@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Local environment files
+.env
+.env.*
+
+# MediaPipe model files
+*.task
+
+# Local media inputs
+data/*.mp4
+data/*.mov
+data/*.avi
+data/*.mkv
+
+# Generated output
+output/*
+!output/.gitkeep
+
+# OS/editor noise
+.DS_Store
+.vscode/
+.idea/
