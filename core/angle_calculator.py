@@ -58,5 +58,13 @@ def angle_difference(a, b):
     if math.isnan(a) or math.isnan(b):
         return float("nan")
 
-    diff = abs((a - b + 180.0) % 360.0 - 180.0)
+    return abs((a - b + 180.0) % 360.0 - 180.0)
+
+
+def axis_angle_difference(a, b):
+    """Return the difference between two undirected segment axes in degrees."""
+    diff = angle_difference(a, b)
+    if math.isnan(diff):
+        return float("nan")
+
     return min(diff, 180.0 - diff)

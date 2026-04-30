@@ -4,7 +4,7 @@ from collections import Counter
 import numpy as np
 
 from core.angle_calculator import (
-    angle_difference,
+    axis_angle_difference,
     distance,
     joint_angle,
     midpoint,
@@ -30,6 +30,8 @@ RIGHT_SIDE = {
     "knee": 26,
     "ankle": 28,
 }
+
+FOOT_LANDMARKS = (27, 28, 29, 30, 31, 32)
 
 PRE_CONTACT_SECONDS = 0.5
 POST_CONTACT_SECONDS = 0.2
@@ -106,7 +108,7 @@ def _score_rep(rep_index, frame_center, frames, fps):
     stability = _score_stability(measurements)
     integrity = _score_integrity(measurements)
     kinetic = _score_kinetic(measurements)
-    overall = _round_score(np.mean([stability, integrity, kinetic]))
+    overall = _score_overall_form(stability, integrity, kinetic)
     critiques = _build_critiques(measurements, stability, integrity, kinetic)
 
     return {
@@ -123,6 +125,9 @@ def _score_rep(rep_index, frame_center, frames, fps):
             "kinetic": kinetic,
             "overall": overall,
         },
+        # Pose-only hint for the 0-3 passing scale. This should be combined
+        # with ball/target outcome later, once detection exists.
+        "form_pass_quality_hint": _form_score_to_pass_quality(overall),
         "measurements": measurements,
         "critiques": critiques,
     }
@@ -145,6 +150,8 @@ def _measure_rep(rep_window, contact_window, side):
         right_shoulder = landmarks[RIGHT_SIDE["shoulder"]]
         left_hip = landmarks[LEFT_SIDE["hip"]]
         right_hip = landmarks[RIGHT_SIDE["hip"]]
+        left_wrist = landmarks[LEFT_SIDE["wrist"]]
+        right_wrist = landmarks[RIGHT_SIDE["wrist"]]
         left_ankle = landmarks[LEFT_SIDE["ankle"]]
         right_ankle = landmarks[RIGHT_SIDE["ankle"]]
 
@@ -170,6 +177,14 @@ def _measure_rep(rep_window, contact_window, side):
             landmarks[side["shoulder"]],
         )
 
+        # Integrity metric: the arms should be held away from the torso,
+        # close to a right angle, instead of tucked into the stomach.
+        arm_torso_angle = joint_angle(
+            landmarks[side["hip"]],
+            landmarks[side["shoulder"]],
+            landmarks[side["wrist"]],
+        )
+
         # Stability metric: torso posture. This estimates forward lean by
         # comparing each hip-to-shoulder segment against the floor line.
         torso_angle = segment_angle_to_floor(left_hip, left_shoulder)
@@ -188,16 +203,24 @@ def _measure_rep(rep_window, contact_window, side):
             landmarks[RIGHT_SIDE["elbow"]],
             landmarks[RIGHT_SIDE["wrist"]],
         )
-        forearm_parallel_delta = angle_difference(left_forearm, right_forearm)
+        forearm_parallel_delta = axis_angle_difference(left_forearm, right_forearm)
 
         frame_measurements.append({
             "knee_angle": knee_angle,
             "elbow_angle": elbow_angle,
+            "arm_torso_angle": arm_torso_angle,
             "torso_angle": torso_angle,
             "forearm_parallel_delta": forearm_parallel_delta,
+            # Integrity metric: hands should be together before contact so
+            # the ball sees one flat, predictable platform.
+            "wrist_gap_ratio": distance(left_wrist, right_wrist) / shoulder_width,
             # Stability metric: rough center-of-gravity depth. Higher values
             # mean the hips are lower relative to the feet and shoulders.
             "cog_ratio": (ankle_y - hip_mid[1]) / body_height,
+            # Stability metric: projected body mass over the support base.
+            # Lower values mean the estimated mass sits closer to the middle
+            # of the feet, which is better for receiving instead of reaching.
+            "balance_offset": _projected_balance_offset(landmarks),
             # Extra critique metric: compares foot width to shoulder width so
             # the scorer can flag a base that is too narrow or too wide.
             "stance_width_ratio": distance(left_ankle, right_ankle) / shoulder_width,
@@ -288,16 +311,36 @@ def _score_stability(measurements):
     # Stability combines lower-body loading, body height, and torso posture.
     knee_score = _score_target_range(measurements["knee_angle"], 120, 155, 90, 180)
     cog_score = _score_target_range(measurements["cog_ratio"], 0.32, 0.52, 0.15, 0.75)
+    balance_score = _score_max_allowed(measurements["balance_offset"], 0.22, 0.55)
     torso_score = _score_target_range(measurements["torso_angle"], 50, 80, 25, 90)
     rise_score = _score_max_allowed(measurements["body_rise"], 0.10, 0.28)
-    return _round_score(np.mean([knee_score, cog_score, torso_score, rise_score]))
+    return _round_score(
+        (knee_score * 0.25)
+        + (cog_score * 0.20)
+        + (balance_score * 0.25)
+        + (torso_score * 0.20)
+        + (rise_score * 0.10)
+    )
 
 
 def _score_integrity(measurements):
     # Integrity focuses on whether the platform is straight and even.
     elbow_score = _score_target_range(measurements["elbow_angle"], 170, 180, 135, 180)
+    arm_torso_score = _score_target_range(
+        measurements["arm_torso_angle"],
+        75,
+        115,
+        35,
+        150,
+    )
+    wrist_score = _score_max_allowed(measurements["wrist_gap_ratio"], 0.65, 1.4)
     parallel_score = _score_max_allowed(measurements["forearm_parallel_delta"], 10, 45)
-    return _round_score(np.mean([elbow_score, parallel_score]))
+    return _round_score(
+        (elbow_score * 0.35)
+        + (parallel_score * 0.25)
+        + (wrist_score * 0.20)
+        + (arm_torso_score * 0.20)
+    )
 
 
 def _score_kinetic(measurements):
@@ -325,13 +368,37 @@ def _score_kinetic(measurements):
     )
 
 
+def _score_overall_form(stability, integrity, kinetic):
+    # Form-only score aligned with the future 0-3 pass scale: strong platform
+    # and ready-position form should make a "3" outcome plausible, while poor
+    # platform integrity should keep lucky passes from scoring too high.
+    return _round_score(
+        (stability * 0.35)
+        + (integrity * 0.40)
+        + (kinetic * 0.25)
+    )
+
+
+def _form_score_to_pass_quality(score):
+    if score >= 85:
+        return 3
+    if score >= 70:
+        return 2
+    if score >= 45:
+        return 1
+    return 0
+
+
 def _build_critiques(measurements, stability, integrity, kinetic):
     critiques = []
     elbow_angle = _measurement(measurements, "elbow_angle")
+    arm_torso_angle = _measurement(measurements, "arm_torso_angle")
     forearm_parallel_delta = _measurement(measurements, "forearm_parallel_delta")
+    wrist_gap_ratio = _measurement(measurements, "wrist_gap_ratio")
     knee_angle = _measurement(measurements, "knee_angle")
     torso_angle = _measurement(measurements, "torso_angle")
     stance_width_ratio = _measurement(measurements, "stance_width_ratio")
+    balance_offset = _measurement(measurements, "balance_offset")
     head_y_delta = _measurement(measurements, "head_y_delta")
     shoulder_hip_offset = _measurement(measurements, "shoulder_hip_offset")
     body_rise = _measurement(measurements, "body_rise")
@@ -350,6 +417,14 @@ def _build_critiques(measurements, stability, integrity, kinetic):
 
     if forearm_parallel_delta > 25:
         critiques.append("Bring the forearms closer to parallel before contact.")
+    if wrist_gap_ratio > 1.4:
+        critiques.append("Bring the hands together earlier to create one platform.")
+    elif wrist_gap_ratio > 0.8:
+        critiques.append("Close the wrist gap so the platform is flatter.")
+    if arm_torso_angle < 65:
+        critiques.append("Hold the platform away from the stomach before contact.")
+    elif arm_torso_angle > 130:
+        critiques.append("Set the platform closer to a right angle with the torso.")
 
     if knee_angle > 160:
         critiques.append("Bend the knees more before contact to load the legs.")
@@ -362,6 +437,11 @@ def _build_critiques(measurements, stability, integrity, kinetic):
         critiques.append("Keep the chest from collapsing too far over the platform.")
     if body_rise > 0.28:
         critiques.append("Avoid popping up after contact; stay low and controlled.")
+
+    if balance_offset > 0.55:
+        critiques.append("Keep your body mass inside your feet instead of reaching for the ball.")
+    elif balance_offset > 0.35:
+        critiques.append("Center your weight more evenly over your base before contact.")
 
     if kinetic < 75:
         critiques.append("Keep the platform connected to the legs through contact.")
@@ -445,7 +525,7 @@ def _platform_score_series(frames):
             landmarks[RIGHT_SIDE["elbow"]],
             landmarks[RIGHT_SIDE["wrist"]],
         )
-        parallel_delta = angle_difference(left_forearm, right_forearm)
+        parallel_delta = axis_angle_difference(left_forearm, right_forearm)
         wrist_score = _score_max_allowed(wrist_gap, 0.75, 2.0)
         parallel_score = _score_max_allowed(parallel_delta, 15, 60)
         values[index] = np.mean([wrist_score, parallel_score])
@@ -505,6 +585,57 @@ def _best_visible_side(window):
     if left_visibility >= right_visibility:
         return "left", LEFT_SIDE
     return "right", RIGHT_SIDE
+
+
+def _projected_balance_offset(landmarks):
+    support_x_values = [
+        landmarks[index].x
+        for index in FOOT_LANDMARKS
+        if getattr(landmarks[index], "visibility", 1.0) >= 0.35
+    ]
+    if len(support_x_values) < 2:
+        support_x_values = [
+            landmarks[LEFT_SIDE["ankle"]].x,
+            landmarks[RIGHT_SIDE["ankle"]].x,
+        ]
+
+    support_left = min(support_x_values)
+    support_right = max(support_x_values)
+    support_width = support_right - support_left
+
+    shoulder_mid = midpoint(
+        landmarks[LEFT_SIDE["shoulder"]],
+        landmarks[RIGHT_SIDE["shoulder"]],
+    )
+    hip_mid = midpoint(
+        landmarks[LEFT_SIDE["hip"]],
+        landmarks[RIGHT_SIDE["hip"]],
+    )
+    knee_mid = midpoint(
+        landmarks[LEFT_SIDE["knee"]],
+        landmarks[RIGHT_SIDE["knee"]],
+    )
+    ankle_mid = midpoint(
+        landmarks[LEFT_SIDE["ankle"]],
+        landmarks[RIGHT_SIDE["ankle"]],
+    )
+    projected_mass_x = (
+        (landmarks[0].x * 0.07)
+        + (shoulder_mid[0] * 0.23)
+        + (hip_mid[0] * 0.42)
+        + (knee_mid[0] * 0.20)
+        + (ankle_mid[0] * 0.08)
+    )
+
+    if support_width <= 0.001:
+        shoulder_width = distance(
+            landmarks[LEFT_SIDE["shoulder"]],
+            landmarks[RIGHT_SIDE["shoulder"]],
+        )
+        support_width = max(shoulder_width, 0.001)
+
+    support_center = (support_left + support_right) / 2.0
+    return abs(projected_mass_x - support_center) / support_width
 
 
 def _side_visibility(window, side):

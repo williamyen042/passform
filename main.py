@@ -7,7 +7,7 @@ from pprint import pprint
 from core.pose_extractor import PoseExtractor
 from core.scorer import analyze_frames
 
-VIDEO_PATH = "data/sample_video2.mp4"
+VIDEO_PATH = "data/sample_video1.mp4"
 OUTPUT_PATH = "output/passform_scored.mp4"
 SAVE_OUTPUT_VIDEO = True
 SCORE_UPDATE_INTERVAL = 5
