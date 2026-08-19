@@ -67,6 +67,21 @@ class BallDetector:
         self.max_aspect_ratio = max_aspect_ratio
 
     def detect(self, frame, frame_index):
+        """Best single candidate for this frame, or None."""
+        candidates = self.detect_candidates(frame, frame_index)
+        return max(
+            candidates,
+            key=lambda detection: detection.confidence,
+            default=None,
+        )
+
+    def detect_candidates(self, frame, frame_index):
+        """Every candidate that survives the geometry filter.
+
+        The tracker needs all of them: the real ball is often not the highest
+        confidence box in a frame, so picking top-1 here throws away the
+        detection that the motion filter would have kept.
+        """
         height, width = frame.shape[:2]
         results = self.model.predict(
             frame,
@@ -75,13 +90,13 @@ class BallDetector:
             verbose=False,
         )
         if not results:
-            return None
+            return []
 
         names = getattr(results[0], "names", None) or getattr(self.model, "names", {})
         candidates = []
         boxes = getattr(results[0], "boxes", None)
         if boxes is None:
-            return None
+            return []
 
         for box in boxes:
             class_id = _scalar(box.cls)
@@ -116,16 +131,7 @@ class BallDetector:
             if self._passes_geometry_filter(detection):
                 candidates.append(detection)
 
-        # ponytail: top confidence per frame, no temporal association. The
-        # background-clutter suppression that used to live here could not work
-        # with a handheld camera (the clutter moves too) and discarded 48 of 77
-        # detections on data/sample_video4.mp4, real ball included. Rebuild it
-        # as a clip-level pass — mark position clusters present in most frames
-        # as background, then link the rest by constant-velocity gate — once
-        # the model is retrained on own-gym footage. Until then the scorer's
-        # BALL_CONTACT_DISTANCE_GATE keeps far-off false positives out of the
-        # scoring path.
-        return max(candidates, key=lambda detection: detection.confidence, default=None)
+        return candidates
 
     def _passes_geometry_filter(self, detection):
         x1, y1, x2, y2 = detection.bbox

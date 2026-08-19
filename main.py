@@ -5,13 +5,16 @@ from PIL import Image, ImageDraw, ImageFont
 from pprint import pprint
 
 from core.ball_detector import BallDetector
-from core.pose_extractor import PoseExtractor
-from core.scorer import analyze_frames
+from core.ball_tracker import contact_frames, evaluate_fit, fit_segment, segments
+from core.pipeline import analyze_video, rep_for_frame
 
 VIDEO_PATH = "data/sample_video4.mp4"
 OUTPUT_PATH = "output/passform_scored.mp4"
 SAVE_OUTPUT_VIDEO = True
-SCORE_UPDATE_INTERVAL = 5
+TRAIL_COLOR = (80, 200, 255)
+PREDICTION_COLOR = (120, 255, 180)
+CONTACT_COLOR = (60, 60, 255)
+PREDICTION_FRAMES = 12
 BALL_MODEL_PATH = "models/volleyball_ball/best.pt"
 BALL_TARGET_CLASSES = ("ball", "sports ball")
 BALL_CONFIDENCE = 0.15
@@ -142,7 +145,58 @@ def draw_ball_detection(frame, detection):
     )
 
 
-def draw_score_overlay(frame, report):
+def draw_trajectory(frame, track, frame_index):
+    """Draw the flight path so far, plus where the fitted arc says it goes."""
+    if track is None:
+        return
+
+    height, width = frame.shape[:2]
+
+    def to_pixels(point):
+        return int(point[0] * width), int(point[1] * height)
+
+    trail = [
+        to_pixels(detection.center)
+        for detection in track.detections
+        if detection.frame_index <= frame_index
+    ]
+    for index in range(1, len(trail)):
+        # Older points fade out so the current position reads clearly.
+        weight = index / len(trail)
+        thickness = 1 + int(round(2 * weight))
+        cv2.line(frame, trail[index - 1], trail[index], TRAIL_COLOR, thickness)
+    if trail:
+        cv2.circle(frame, trail[-1], 7, TRAIL_COLOR, 2)
+
+    active = None
+    for segment in segments(track):
+        if segment.frame_indices[0] <= frame_index <= segment.frame_indices[-1]:
+            active = segment
+    fit = fit_segment(active)
+    if fit is None:
+        return
+
+    projected = [
+        to_pixels(evaluate_fit(fit, frame_index + step))
+        for step in range(0, PREDICTION_FRAMES)
+    ]
+    # Dashed, so the prediction never reads as observed data.
+    for index in range(1, len(projected), 2):
+        cv2.line(frame, projected[index - 1], projected[index], PREDICTION_COLOR, 2)
+
+
+def draw_contacts(frame, track, frame_index, contacts):
+    height, width = frame.shape[:2]
+    for detection in track.detections if track else []:
+        if detection.frame_index not in contacts:
+            continue
+        if detection.frame_index > frame_index:
+            continue
+        center = int(detection.center[0] * width), int(detection.center[1] * height)
+        cv2.drawMarker(frame, center, CONTACT_COLOR, cv2.MARKER_CROSS, 22, 2)
+
+
+def draw_score_overlay(frame, report, rep):
     overlay = frame.copy()
     height, width = frame.shape[:2]
     panel_height = 128
@@ -150,7 +204,7 @@ def draw_score_overlay(frame, report):
     cv2.rectangle(overlay, (0, 0), (width, panel_height), (18, 18, 18), -1)
     cv2.addWeighted(overlay, 0.72, frame, 0.28, 0, frame)
 
-    if not report or not report["reps"]:
+    if rep is None:
         draw_text(
             frame=frame,
             text="PassForm: collecting pose data...",
@@ -160,8 +214,7 @@ def draw_score_overlay(frame, report):
         )
         return
 
-    latest_rep = report["reps"][-1]
-    scores = latest_rep["scores"]
+    scores = rep["scores"]
     metrics = [
         ("Overall", report["overall_score"], (255, 255, 255)),
         ("Stability", scores["stability"], (80, 220, 255)),
@@ -171,7 +224,7 @@ def draw_score_overlay(frame, report):
 
     draw_text(
         frame=frame,
-        text="PassForm Rep",
+        text=f"PassForm Rep {rep['rep_index']}/{len(report['reps'])}",
         position=(20, 18),
         font=FONT_MEDIUM,
     )
@@ -190,8 +243,8 @@ def draw_score_overlay(frame, report):
         draw_text(frame, text, (x, 58), FONT_SMALL, color=color)
         x += text_width(text, FONT_SMALL) + gap
 
-    contact_label = f"Contact frame {latest_rep['frame_center']}"
-    contact_source = latest_rep.get("contact_source")
+    contact_label = f"Contact frame {rep['frame_center']}"
+    contact_source = rep.get("contact_source")
     if contact_source:
         contact_label = f"{contact_label} ({contact_source})"
     draw_text(
@@ -202,19 +255,18 @@ def draw_score_overlay(frame, report):
         color=(235, 235, 235),
     )
 
-    critique = latest_rep["critiques"][0] if latest_rep["critiques"] else ""
+    critique = rep["critiques"][0] if rep["critiques"] else ""
     if critique:
         draw_text(frame, critique[:90], (20, 98), FONT_SMALL, color=(235, 235, 235))
 
 
-def draw_metric_labels(frame, landmarks, report):
-    if not report or not report["reps"] or not landmarks:
+def draw_metric_labels(frame, landmarks, rep):
+    if rep is None or not landmarks:
         return
 
-    latest_rep = report["reps"][-1]
-    measurements = latest_rep["measurements"]
-    scores = latest_rep["scores"]
-    side = SIDE_LANDMARKS[latest_rep.get("side_used", "left")]
+    measurements = rep["measurements"]
+    scores = rep["scores"]
+    side = SIDE_LANDMARKS[rep.get("side_used", "left")]
 
     label_specs = [
         (
@@ -262,88 +314,74 @@ def draw_metric_labels(frame, landmarks, report):
     )
 
 
-cap = cv2.VideoCapture(VIDEO_PATH)
-extractor = PoseExtractor(mode="video")
-ball_detector = BallDetector(
-    model_path=BALL_MODEL_PATH,
-    target_classes=BALL_TARGET_CLASSES,
-    confidence=BALL_CONFIDENCE,
-    image_size=BALL_IMAGE_SIZE,
-)
-printed_detection = False
-frames_landmarks = []
-ball_detections = []
-latest_report = None
-writer = None
+def render(video_path, analysis, output_path=None):
+    """Second pass: redraw the clip with the final, whole-video scores."""
+    capture = cv2.VideoCapture(str(video_path))
+    if not capture.isOpened():
+        raise FileNotFoundError(f"Could not open video: {video_path}")
 
-if not cap.isOpened():
-    raise FileNotFoundError(f"Could not open video: {VIDEO_PATH}")
-
-fps = cap.get(cv2.CAP_PROP_FPS) or 30
-
-if SAVE_OUTPUT_VIDEO:
-    Path(OUTPUT_PATH).parent.mkdir(parents=True, exist_ok=True)
-    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-    writer = cv2.VideoWriter(OUTPUT_PATH, fourcc, fps, (width, height))
-
-while cap.isOpened():
-    success, frame = cap.read()
-    if not success:
-        break
-
-    current_landmarks = None
-    frame_index = len(frames_landmarks)
-    current_ball_detection = ball_detector.detect(frame, frame_index)
-    # CAP_PROP_POS_MSEC is read after cap.read(), so it reports the *next*
-    # frame, and some codecs just return 0 forever. MediaPipe video mode
-    # needs strictly increasing timestamps, so derive them from the index.
-    timestamp_ms = int(frame_index * 1000 / fps)
-    result = extractor.process_frame(frame, timestamp_ms)
-
-    if result.pose_landmarks:
-        landmarks = extractor.get_landmarks(result)
-        current_landmarks = landmarks
-        frames_landmarks.append(landmarks)
-
-        if not printed_detection:
-            print(f"Detected {len(landmarks)} landmarks")
-            print("First landmark:", landmarks[0])
-            printed_detection = True
-
-        draw_landmarks(frame, landmarks)
-    else:
-        frames_landmarks.append(None)
-
-    ball_detections.append(current_ball_detection)
-    draw_ball_detection(frame, current_ball_detection)
-
-    if len(frames_landmarks) % SCORE_UPDATE_INTERVAL == 0:
-        latest_report = analyze_frames(
-            frames_landmarks,
-            fps=fps,
-            ball_detections=ball_detections,
+    writer = None
+    if output_path is not None:
+        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+        width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+        writer = cv2.VideoWriter(
+            str(output_path),
+            fourcc,
+            analysis.fps,
+            (width, height),
         )
 
-    draw_score_overlay(frame, latest_report)
-    draw_metric_labels(frame, current_landmarks, latest_report)
+    contacts = set(contact_frames(analysis.ball_track))
 
-    if writer is not None:
-        writer.write(frame)
+    try:
+        for frame_index, landmarks in enumerate(analysis.frames_landmarks):
+            success, frame = capture.read()
+            if not success:
+                break
 
-    cv2.imshow("PassForm Pose Test", frame)
+            if landmarks:
+                draw_landmarks(frame, landmarks)
+            draw_ball_detection(frame, analysis.ball_detections[frame_index])
+            draw_trajectory(frame, analysis.ball_track, frame_index)
+            draw_contacts(frame, analysis.ball_track, frame_index, contacts)
 
-    if cv2.waitKey(1) & 0xFF == ord("q"):
-        break
+            rep = rep_for_frame(analysis.report, frame_index)
+            draw_score_overlay(frame, analysis.report, rep)
+            draw_metric_labels(frame, landmarks, rep)
 
-cap.release()
-if writer is not None:
-    writer.release()
-cv2.destroyAllWindows()
+            if writer is not None:
+                writer.write(frame)
 
-report = analyze_frames(frames_landmarks, fps=fps, ball_detections=ball_detections)
-pprint(report)
+            cv2.imshow("PassForm", frame)
+            if cv2.waitKey(1) & 0xFF == ord("q"):
+                break
+    finally:
+        capture.release()
+        if writer is not None:
+            writer.release()
+        cv2.destroyAllWindows()
 
-if SAVE_OUTPUT_VIDEO:
-    print(f"Saved scored video to {OUTPUT_PATH}")
+
+def main():
+    ball_detector = BallDetector(
+        model_path=BALL_MODEL_PATH,
+        target_classes=BALL_TARGET_CLASSES,
+        confidence=BALL_CONFIDENCE,
+        image_size=BALL_IMAGE_SIZE,
+    )
+    analysis = analyze_video(VIDEO_PATH, ball_detector=ball_detector)
+
+    pprint(analysis.report)
+    render(
+        VIDEO_PATH,
+        analysis,
+        output_path=OUTPUT_PATH if SAVE_OUTPUT_VIDEO else None,
+    )
+    if SAVE_OUTPUT_VIDEO:
+        print(f"Saved scored video to {OUTPUT_PATH}")
+
+
+if __name__ == "__main__":
+    main()
