@@ -15,6 +15,13 @@ env/
 # MediaPipe model files
 *.task
 
+# YOLO model weights
+*.pt
+
+# Training datasets and runs
+datasets/
+runs/
+
 # Local media inputs
 data/*.mp4
 data/*.mov

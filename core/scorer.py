@@ -38,11 +38,16 @@ POST_CONTACT_SECONDS = 0.2
 KINETIC_PRE_CONTACT_SECONDS = 0.15
 KINETIC_POST_CONTACT_SECONDS = 0.25
 SMOOTHING_RADIUS = 2
+BALL_GAP_INTERPOLATION_FRAMES = 3
+BALL_CONTACT_DISTANCE_GATE = 1.25
+BALL_CONTACT_VELOCITY_WINDOW = 3
+BALL_CONTACT_MIN_REVERSAL = 0.05
 
 
-def analyze_frames(frames_landmarks, fps=30):
+def analyze_frames(frames_landmarks, fps=30, ball_detections=None):
     """Analyze one uploaded pass rep from an ordered landmark sequence."""
     frames = list(frames_landmarks)
+    ball_detections = _aligned_ball_detections(ball_detections, len(frames))
     fps = max(float(fps or 30), 1.0)
     valid_indices = [
         index for index, landmarks in enumerate(frames)
@@ -60,8 +65,8 @@ def analyze_frames(frames_landmarks, fps=30):
     smoothed_hip_y = _smooth_series(hip_y, SMOOTHING_RADIUS)
     platform_score = _smooth_series(_platform_score_series(frames), SMOOTHING_RADIUS)
     rep_signal = _combined_rep_signal(smoothed_hip_y, platform_score, valid_indices)
-    contact_center = _detect_contact_center(rep_signal, valid_indices)
-    rep = _score_rep(1, contact_center, frames, fps)
+    contact = _detect_contact(rep_signal, valid_indices, frames, ball_detections)
+    rep = _score_rep(1, contact["frame_index"], frames, fps, contact)
     reps = [rep] if rep is not None else []
 
     if not reps:
@@ -76,11 +81,12 @@ def analyze_frames(frames_landmarks, fps=30):
     return {
         "overall_score": overall_score,
         "summary": _build_summary(reps),
+        "contact_source": reps[-1]["contact_source"],
         "reps": reps,
     }
 
 
-def _score_rep(rep_index, frame_center, frames, fps):
+def _score_rep(rep_index, frame_center, frames, fps, contact=None):
     pre_contact_frames = max(1, int(round(PRE_CONTACT_SECONDS * fps)))
     post_contact_frames = max(1, int(round(POST_CONTACT_SECONDS * fps)))
     kinetic_pre_frames = max(1, int(round(KINETIC_PRE_CONTACT_SECONDS * fps)))
@@ -118,6 +124,9 @@ def _score_rep(rep_index, frame_center, frames, fps):
         "frame_end": frame_end,
         "contact_start": contact_start,
         "contact_end": contact_end,
+        "contact_source": _contact_value(contact, "contact_source", "pose_proxy"),
+        "ball_contact_distance": _contact_value(contact, "ball_contact_distance"),
+        "ball_confidence": _contact_value(contact, "ball_confidence"),
         "side_used": side_name,
         "scores": {
             "stability": stability,
@@ -487,10 +496,170 @@ def _build_summary(reps):
     return [critique for critique, _ in counts.most_common(3)]
 
 
-def _detect_contact_center(rep_signal, valid_indices):
+def _detect_contact(rep_signal, valid_indices, frames, ball_detections):
+    ball_contact = _detect_ball_contact(frames, ball_detections, valid_indices)
+    if ball_contact is not None:
+        return ball_contact
+
+    return {
+        "frame_index": _detect_pose_contact_center(rep_signal, valid_indices),
+        "contact_source": "pose_proxy",
+        "ball_contact_distance": None,
+        "ball_confidence": None,
+    }
+
+
+def _detect_pose_contact_center(rep_signal, valid_indices):
     """Pick the strongest pose-only estimate of ball contact for one-rep mode."""
     valid_values = rep_signal[valid_indices]
     return int(valid_indices[np.nanargmax(valid_values)])
+
+
+def _detect_ball_contact(frames, ball_detections, valid_indices):
+    if not ball_detections or not any(ball_detections):
+        return None
+
+    ball_track = _interpolated_ball_track(ball_detections)
+    metrics = {}
+    for index in valid_indices:
+        landmarks = frames[index]
+        ball = ball_track[index] if index < len(ball_track) else None
+        if ball is None or not _has_full_pose(landmarks):
+            continue
+
+        platform_point = _platform_point(landmarks)
+        shoulder_width = max(
+            distance(
+                landmarks[LEFT_SIDE["shoulder"]],
+                landmarks[RIGHT_SIDE["shoulder"]],
+            ),
+            0.001,
+        )
+        ball_center = np.array(ball["center"], dtype=float)
+        distance_ratio = float(np.linalg.norm(ball_center - platform_point) / shoulder_width)
+        metrics[index] = {
+            "distance_ratio": distance_ratio,
+            "confidence": ball["confidence"],
+            "interpolated": ball["interpolated"],
+        }
+
+    best = None
+    for index, current in metrics.items():
+        if current["distance_ratio"] > BALL_CONTACT_DISTANCE_GATE:
+            continue
+
+        previous = _window_endpoint_metric(metrics, index, -BALL_CONTACT_VELOCITY_WINDOW)
+        following = _window_endpoint_metric(metrics, index, BALL_CONTACT_VELOCITY_WINDOW)
+        if previous is None or following is None:
+            continue
+
+        approach = previous["distance_ratio"] - current["distance_ratio"]
+        depart = following["distance_ratio"] - current["distance_ratio"]
+        if approach < BALL_CONTACT_MIN_REVERSAL or depart < BALL_CONTACT_MIN_REVERSAL:
+            continue
+
+        reversal_strength = approach + depart
+        score = (
+            current["distance_ratio"]
+            - (current["confidence"] * 0.15)
+            - (min(reversal_strength, 1.0) * 0.25)
+            + (0.05 if current["interpolated"] else 0.0)
+        )
+        candidate = {
+            "frame_index": int(index),
+            "contact_source": "ball",
+            "ball_contact_distance": float(round(current["distance_ratio"], 3)),
+            "ball_confidence": float(round(current["confidence"], 3)),
+            "_score": score,
+        }
+        if best is None or candidate["_score"] < best["_score"]:
+            best = candidate
+
+    if best is None:
+        return None
+
+    best.pop("_score", None)
+    return best
+
+
+def _aligned_ball_detections(ball_detections, frame_count):
+    if ball_detections is None:
+        return [None] * frame_count
+
+    aligned = list(ball_detections)[:frame_count]
+    if len(aligned) < frame_count:
+        aligned.extend([None] * (frame_count - len(aligned)))
+    return aligned
+
+
+def _interpolated_ball_track(ball_detections):
+    track = [_ball_track_entry(detection) for detection in ball_detections]
+    valid_indices = [index for index, entry in enumerate(track) if entry is not None]
+
+    for left_index, right_index in zip(valid_indices, valid_indices[1:]):
+        gap = right_index - left_index - 1
+        if gap <= 0 or gap > BALL_GAP_INTERPOLATION_FRAMES:
+            continue
+
+        left = track[left_index]
+        right = track[right_index]
+        for offset in range(1, gap + 1):
+            ratio = offset / (gap + 1)
+            center = (
+                (left["center"][0] * (1.0 - ratio)) + (right["center"][0] * ratio),
+                (left["center"][1] * (1.0 - ratio)) + (right["center"][1] * ratio),
+            )
+            track[left_index + offset] = {
+                "center": center,
+                "confidence": min(left["confidence"], right["confidence"]) * 0.8,
+                "interpolated": True,
+            }
+
+    return track
+
+
+def _ball_track_entry(detection):
+    if detection is None:
+        return None
+
+    center = _ball_detection_value(detection, "center")
+    if center is None or len(center) != 2:
+        return None
+
+    confidence = _ball_detection_value(detection, "confidence", 0.0)
+    return {
+        "center": (float(center[0]), float(center[1])),
+        "confidence": float(confidence or 0.0),
+        "interpolated": False,
+    }
+
+
+def _ball_detection_value(detection, key, default=None):
+    if isinstance(detection, dict):
+        return detection.get(key, default)
+    return getattr(detection, key, default)
+
+
+def _contact_value(contact, key, default=None):
+    if contact is None:
+        return default
+    return contact.get(key, default)
+
+
+def _platform_point(landmarks):
+    return midpoint(
+        landmarks[LEFT_SIDE["wrist"]],
+        landmarks[RIGHT_SIDE["wrist"]],
+    )
+
+
+def _window_endpoint_metric(metrics, index, offset):
+    step = 1 if offset > 0 else -1
+    for probe in range(index + offset, index, -step):
+        metric = metrics.get(probe)
+        if metric is not None:
+            return metric
+    return None
 
 
 def _combined_rep_signal(hip_y, platform_score, valid_indices):

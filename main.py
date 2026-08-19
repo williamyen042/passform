@@ -4,13 +4,18 @@ from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
 from pprint import pprint
 
+from core.ball_detector import BallDetector
 from core.pose_extractor import PoseExtractor
 from core.scorer import analyze_frames
 
-VIDEO_PATH = "data/sample_video1.mp4"
+VIDEO_PATH = "data/sample_video4.mp4"
 OUTPUT_PATH = "output/passform_scored.mp4"
 SAVE_OUTPUT_VIDEO = True
 SCORE_UPDATE_INTERVAL = 5
+BALL_MODEL_PATH = "models/volleyball_ball/best.pt"
+BALL_TARGET_CLASSES = ("ball", "sports ball")
+BALL_CONFIDENCE = 0.15
+BALL_IMAGE_SIZE = 960
 FONT_PATHS = [
     "/Library/Fonts/Calibri.ttf",
     "/System/Library/Fonts/Supplemental/Calibri.ttf",
@@ -94,6 +99,11 @@ def landmark_point(frame, landmark):
     return int(landmark.x * width), int(landmark.y * height)
 
 
+def normalized_point(frame, point):
+    height, width = frame.shape[:2]
+    return int(point[0] * width), int(point[1] * height)
+
+
 def draw_landmarks(frame, landmarks):
     height, width = frame.shape[:2]
     points = [
@@ -106,6 +116,30 @@ def draw_landmarks(frame, landmarks):
 
     for landmark_index in DISPLAY_LANDMARKS:
         cv2.circle(frame, points[landmark_index], 4, (0, 0, 255), -1)
+
+
+def draw_ball_detection(frame, detection):
+    if detection is None:
+        return
+
+    height, width = frame.shape[:2]
+    x1, y1, x2, y2 = detection.bbox
+    left = int(x1 * width)
+    top = int(y1 * height)
+    right = int(x2 * width)
+    bottom = int(y2 * height)
+    center = normalized_point(frame, detection.center)
+
+    cv2.rectangle(frame, (left, top), (right, bottom), (0, 220, 255), 2)
+    cv2.circle(frame, center, 5, (0, 220, 255), -1)
+    draw_text(
+        frame,
+        f"ball {detection.confidence:.2f}",
+        (left, max(14, top - 22)),
+        FONT_SMALL,
+        color=(0, 220, 255),
+        background=(20, 20, 20),
+    )
 
 
 def draw_score_overlay(frame, report):
@@ -156,10 +190,14 @@ def draw_score_overlay(frame, report):
         draw_text(frame, text, (x, 58), FONT_SMALL, color=color)
         x += text_width(text, FONT_SMALL) + gap
 
+    contact_label = f"Contact frame {latest_rep['frame_center']}"
+    contact_source = latest_rep.get("contact_source")
+    if contact_source:
+        contact_label = f"{contact_label} ({contact_source})"
     draw_text(
         frame,
-        f"Contact frame {latest_rep['frame_center']}",
-        (max(20, width - 260), 18),
+        contact_label,
+        (max(20, width - 330), 18),
         FONT_SMALL,
         color=(235, 235, 235),
     )
@@ -226,8 +264,15 @@ def draw_metric_labels(frame, landmarks, report):
 
 cap = cv2.VideoCapture(VIDEO_PATH)
 extractor = PoseExtractor(mode="video")
+ball_detector = BallDetector(
+    model_path=BALL_MODEL_PATH,
+    target_classes=BALL_TARGET_CLASSES,
+    confidence=BALL_CONFIDENCE,
+    image_size=BALL_IMAGE_SIZE,
+)
 printed_detection = False
 frames_landmarks = []
+ball_detections = []
 latest_report = None
 writer = None
 
@@ -249,7 +294,12 @@ while cap.isOpened():
         break
 
     current_landmarks = None
-    timestamp_ms = int(cap.get(cv2.CAP_PROP_POS_MSEC))
+    frame_index = len(frames_landmarks)
+    current_ball_detection = ball_detector.detect(frame, frame_index)
+    # CAP_PROP_POS_MSEC is read after cap.read(), so it reports the *next*
+    # frame, and some codecs just return 0 forever. MediaPipe video mode
+    # needs strictly increasing timestamps, so derive them from the index.
+    timestamp_ms = int(frame_index * 1000 / fps)
     result = extractor.process_frame(frame, timestamp_ms)
 
     if result.pose_landmarks:
@@ -266,8 +316,15 @@ while cap.isOpened():
     else:
         frames_landmarks.append(None)
 
+    ball_detections.append(current_ball_detection)
+    draw_ball_detection(frame, current_ball_detection)
+
     if len(frames_landmarks) % SCORE_UPDATE_INTERVAL == 0:
-        latest_report = analyze_frames(frames_landmarks, fps=fps)
+        latest_report = analyze_frames(
+            frames_landmarks,
+            fps=fps,
+            ball_detections=ball_detections,
+        )
 
     draw_score_overlay(frame, latest_report)
     draw_metric_labels(frame, current_landmarks, latest_report)
@@ -285,7 +342,7 @@ if writer is not None:
     writer.release()
 cv2.destroyAllWindows()
 
-report = analyze_frames(frames_landmarks, fps=fps)
+report = analyze_frames(frames_landmarks, fps=fps, ball_detections=ball_detections)
 pprint(report)
 
 if SAVE_OUTPUT_VIDEO:
