@@ -42,6 +42,12 @@ BALL_GAP_INTERPOLATION_FRAMES = 3
 BALL_CONTACT_DISTANCE_GATE = 1.25
 BALL_CONTACT_VELOCITY_WINDOW = 3
 BALL_CONTACT_MIN_REVERSAL = 0.05
+# A passer cannot physically produce two contacts closer together than this, so
+# it doubles as the non-max-suppression window for rep segmentation.
+MIN_REP_SEPARATION_SECONDS = 0.8
+# Secondary peaks count as reps only if they are nearly as strong as the best
+# one. Keeps a single-rep clip returning exactly one rep.
+REP_PEAK_MIN_FRACTION = 0.75
 
 
 def analyze_frames(frames_landmarks, fps=30, ball_detections=None):
@@ -65,9 +71,18 @@ def analyze_frames(frames_landmarks, fps=30, ball_detections=None):
     smoothed_hip_y = _smooth_series(hip_y, SMOOTHING_RADIUS)
     platform_score = _smooth_series(_platform_score_series(frames), SMOOTHING_RADIUS)
     rep_signal = _combined_rep_signal(smoothed_hip_y, platform_score, valid_indices)
-    contact = _detect_contact(rep_signal, valid_indices, frames, ball_detections)
-    rep = _score_rep(1, contact["frame_index"], frames, fps, contact)
-    reps = [rep] if rep is not None else []
+    contacts = _detect_contacts(
+        rep_signal,
+        valid_indices,
+        frames,
+        ball_detections,
+        fps,
+    )
+    reps = []
+    for rep_index, contact in enumerate(contacts, start=1):
+        rep = _score_rep(rep_index, contact["frame_index"], frames, fps, contact)
+        if rep is not None:
+            reps.append(rep)
 
     if not reps:
         return {
@@ -496,28 +511,70 @@ def _build_summary(reps):
     return [critique for critique, _ in counts.most_common(3)]
 
 
-def _detect_contact(rep_signal, valid_indices, frames, ball_detections):
-    ball_contact = _detect_ball_contact(frames, ball_detections, valid_indices)
-    if ball_contact is not None:
-        return ball_contact
+def _detect_contacts(rep_signal, valid_indices, frames, ball_detections, fps):
+    """Return one contact descriptor per detected rep, ordered by frame."""
+    separation = max(1, int(round(MIN_REP_SEPARATION_SECONDS * fps)))
+    ball_contacts = _detect_ball_contacts(
+        frames,
+        ball_detections,
+        valid_indices,
+        separation,
+    )
+    if ball_contacts:
+        return ball_contacts
 
-    return {
-        "frame_index": _detect_pose_contact_center(rep_signal, valid_indices),
-        "contact_source": "pose_proxy",
-        "ball_contact_distance": None,
-        "ball_confidence": None,
-    }
+    return [
+        {
+            "frame_index": frame_index,
+            "contact_source": "pose_proxy",
+            "ball_contact_distance": None,
+            "ball_confidence": None,
+        }
+        for frame_index in _detect_pose_contact_centers(
+            rep_signal,
+            valid_indices,
+            separation,
+        )
+    ]
 
 
-def _detect_pose_contact_center(rep_signal, valid_indices):
-    """Pick the strongest pose-only estimate of ball contact for one-rep mode."""
+def _detect_pose_contact_centers(rep_signal, valid_indices, separation):
+    """Pick pose-only contact estimates: greedy peaks, one rep apart.
+
+    ponytail: greedy peak picking, not a real segmenter. It cannot split two
+    passes that blend into each other, and REP_PEAK_MIN_FRACTION is a guess.
+    The hand-labeled contact frames from the dataset build are what tell us
+    whether this needs replacing.
+    """
     valid_values = rep_signal[valid_indices]
-    return int(valid_indices[np.nanargmax(valid_values)])
+    best = float(np.nanmax(valid_values))
+    if math.isclose(best, float(np.nanmin(valid_values))):
+        return [int(valid_indices[int(np.nanargmax(valid_values))])]
+
+    floor = best * REP_PEAK_MIN_FRACTION
+    remaining = {
+        int(frame_index): float(value)
+        for frame_index, value in zip(valid_indices, valid_values)
+        if not math.isnan(value)
+    }
+    centers = []
+    while remaining:
+        frame_index = max(remaining, key=remaining.get)
+        if remaining[frame_index] < floor:
+            break
+        centers.append(frame_index)
+        remaining = {
+            other: value
+            for other, value in remaining.items()
+            if abs(other - frame_index) >= separation
+        }
+
+    return sorted(centers)
 
 
-def _detect_ball_contact(frames, ball_detections, valid_indices):
+def _detect_ball_contacts(frames, ball_detections, valid_indices, separation):
     if not ball_detections or not any(ball_detections):
-        return None
+        return []
 
     ball_track = _interpolated_ball_track(ball_detections)
     metrics = {}
@@ -543,7 +600,7 @@ def _detect_ball_contact(frames, ball_detections, valid_indices):
             "interpolated": ball["interpolated"],
         }
 
-    best = None
+    candidates = []
     for index, current in metrics.items():
         if current["distance_ratio"] > BALL_CONTACT_DISTANCE_GATE:
             continue
@@ -565,21 +622,27 @@ def _detect_ball_contact(frames, ball_detections, valid_indices):
             - (min(reversal_strength, 1.0) * 0.25)
             + (0.05 if current["interpolated"] else 0.0)
         )
-        candidate = {
+        candidates.append({
             "frame_index": int(index),
             "contact_source": "ball",
             "ball_contact_distance": float(round(current["distance_ratio"], 3)),
             "ball_confidence": float(round(current["confidence"], 3)),
             "_score": score,
-        }
-        if best is None or candidate["_score"] < best["_score"]:
-            best = candidate
+        })
 
-    if best is None:
-        return None
+    # Lower _score is a better contact, so keep the best candidate in each
+    # separation window and drop the rest.
+    chosen = []
+    for candidate in sorted(candidates, key=lambda item: item["_score"]):
+        if all(
+            abs(candidate["frame_index"] - other["frame_index"]) >= separation
+            for other in chosen
+        ):
+            chosen.append(candidate)
 
-    best.pop("_score", None)
-    return best
+    for candidate in chosen:
+        candidate.pop("_score", None)
+    return sorted(chosen, key=lambda item: item["frame_index"])
 
 
 def _aligned_ball_detections(ball_detections, frame_count):
