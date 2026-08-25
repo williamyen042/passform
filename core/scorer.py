@@ -48,6 +48,10 @@ MIN_REP_SEPARATION_SECONDS = 0.8
 # Secondary peaks count as reps only if they are nearly as strong as the best
 # one. Keeps a single-rep clip returning exactly one rep.
 REP_PEAK_MIN_FRACTION = 0.75
+# ...and only if the signal genuinely falls away between them. Height alone is
+# not enough: a broad plateau has plenty of points above 75% of its own maximum
+# and none of them are separate reps.
+REP_VALLEY_FRACTION = 0.7
 
 
 def analyze_frames(frames_landmarks, fps=30, ball_detections=None):
@@ -562,7 +566,8 @@ def _detect_pose_contact_centers(rep_signal, valid_indices, separation):
         frame_index = max(remaining, key=remaining.get)
         if remaining[frame_index] < floor:
             break
-        centers.append(frame_index)
+        if _separated_by_a_valley(rep_signal, centers, frame_index):
+            centers.append(frame_index)
         remaining = {
             other: value
             for other, value in remaining.items()
@@ -570,6 +575,17 @@ def _detect_pose_contact_centers(rep_signal, valid_indices, separation):
         }
 
     return sorted(centers)
+
+
+def _separated_by_a_valley(rep_signal, accepted, candidate):
+    """True when the signal dips away between this peak and every earlier one."""
+    for peak in accepted:
+        low = min(candidate, peak)
+        high = max(candidate, peak)
+        valley = np.nanmin(rep_signal[low:high + 1])
+        if valley > REP_VALLEY_FRACTION * min(rep_signal[peak], rep_signal[candidate]):
+            return False
+    return True
 
 
 def _detect_ball_contacts(frames, ball_detections, valid_indices, separation):
@@ -733,34 +749,58 @@ def _combined_rep_signal(hip_y, platform_score, valid_indices):
     return (0.6 * hip_component) + (0.4 * platform_component)
 
 
+def platform_score(landmarks):
+    """How much a pose looks like a formed passing platform, 0-100.
+
+    Wrists together and forearms parallel are not enough on their own: a person
+    standing idle with their arms at their sides scores about 85 on those two
+    alone. The arm-to-torso term is what separates a passer from anyone else in
+    the frame, so this doubles as the passer/target discriminator.
+    """
+    if not _has_full_pose(landmarks):
+        return float("nan")
+
+    shoulder_width = max(
+        distance(landmarks[LEFT_SIDE["shoulder"]], landmarks[RIGHT_SIDE["shoulder"]]),
+        0.001,
+    )
+    wrist_gap = (
+        distance(landmarks[LEFT_SIDE["wrist"]], landmarks[RIGHT_SIDE["wrist"]])
+        / shoulder_width
+    )
+    left_forearm = segment_heading(
+        landmarks[LEFT_SIDE["elbow"]],
+        landmarks[LEFT_SIDE["wrist"]],
+    )
+    right_forearm = segment_heading(
+        landmarks[RIGHT_SIDE["elbow"]],
+        landmarks[RIGHT_SIDE["wrist"]],
+    )
+    parallel_delta = axis_angle_difference(left_forearm, right_forearm)
+    arm_torso_angle = float(np.nanmean([
+        joint_angle(
+            landmarks[LEFT_SIDE["hip"]],
+            landmarks[LEFT_SIDE["shoulder"]],
+            landmarks[LEFT_SIDE["wrist"]],
+        ),
+        joint_angle(
+            landmarks[RIGHT_SIDE["hip"]],
+            landmarks[RIGHT_SIDE["shoulder"]],
+            landmarks[RIGHT_SIDE["wrist"]],
+        ),
+    ]))
+
+    return float(np.mean([
+        _score_max_allowed(wrist_gap, 0.75, 2.0),
+        _score_max_allowed(parallel_delta, 15, 60),
+        _score_target_range(arm_torso_angle, 55, 120, 15, 165),
+    ]))
+
+
 def _platform_score_series(frames):
-    # Estimates whether the passing platform is formed by checking if wrists
-    # are close together and forearms are nearly parallel.
     values = np.full(len(frames), np.nan, dtype=float)
     for index, landmarks in enumerate(frames):
-        if not _has_full_pose(landmarks):
-            continue
-
-        shoulder_width = max(
-            distance(landmarks[LEFT_SIDE["shoulder"]], landmarks[RIGHT_SIDE["shoulder"]]),
-            0.001,
-        )
-        wrist_gap = (
-            distance(landmarks[LEFT_SIDE["wrist"]], landmarks[RIGHT_SIDE["wrist"]])
-            / shoulder_width
-        )
-        left_forearm = segment_heading(
-            landmarks[LEFT_SIDE["elbow"]],
-            landmarks[LEFT_SIDE["wrist"]],
-        )
-        right_forearm = segment_heading(
-            landmarks[RIGHT_SIDE["elbow"]],
-            landmarks[RIGHT_SIDE["wrist"]],
-        )
-        parallel_delta = axis_angle_difference(left_forearm, right_forearm)
-        wrist_score = _score_max_allowed(wrist_gap, 0.75, 2.0)
-        parallel_score = _score_max_allowed(parallel_delta, 15, 60)
-        values[index] = np.mean([wrist_score, parallel_score])
+        values[index] = platform_score(landmarks)
     return values
 
 

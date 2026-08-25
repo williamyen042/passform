@@ -10,6 +10,7 @@ from typing import List, NamedTuple, Optional
 import cv2
 
 from core.ball_tracker import track_ball, track_detections
+from core.people import assign_roles, track_people
 from core.pose_extractor import PoseExtractor
 from core.scorer import analyze_frames
 
@@ -25,17 +26,28 @@ class VideoAnalysis(NamedTuple):
     # The single flight path the tracker kept, or None when nothing in the
     # clip moved like a ball.
     ball_track: Optional[object] = None
+    # Whole-clip tracks for the two people we care about. target is None when
+    # only one person is in frame.
+    passer: Optional[object] = None
+    target: Optional[object] = None
 
 
-def analyze_video(video_path, ball_detector=None):
+# Opt in to 2 only when a second person is genuinely in frame. MediaPipe
+# returns slightly different landmarks in multi-pose mode even when it still
+# finds exactly one person, and on single-person clips that shifted detected
+# contact by up to 31 frames.
+DEFAULT_NUM_POSES = 1
+
+
+def analyze_video(video_path, ball_detector=None, num_poses=DEFAULT_NUM_POSES):
     """Decode a clip, extract pose (and optionally the ball), then score it."""
     capture = cv2.VideoCapture(str(video_path))
     if not capture.isOpened():
         raise FileNotFoundError(f"Could not open video: {video_path}")
 
-    extractor = PoseExtractor(mode="video")
+    extractor = PoseExtractor(mode="video", num_poses=num_poses)
     fps = capture.get(cv2.CAP_PROP_FPS) or 30
-    frames_landmarks = []
+    poses_per_frame = []
     ball_candidates = []
 
     try:
@@ -44,7 +56,7 @@ def analyze_video(video_path, ball_detector=None):
             if not success:
                 break
 
-            frame_index = len(frames_landmarks)
+            frame_index = len(poses_per_frame)
             ball_candidates.append(
                 ball_detector.detect_candidates(frame, frame_index)
                 if ball_detector is not None
@@ -55,17 +67,23 @@ def analyze_video(video_path, ball_detector=None):
             # *next* frame, and some codecs return 0 forever, which breaks
             # MediaPipe's strictly-increasing timestamp requirement.
             result = extractor.process_frame(frame, int(frame_index * 1000 / fps))
-            frames_landmarks.append(
-                extractor.get_landmarks(result) if result.pose_landmarks else None
-            )
+            poses_per_frame.append(extractor.get_all_landmarks(result))
     finally:
         capture.release()
+
+    # Only the passer is scored. Without this, a bystander in the background
+    # can become pose[0] for part of the clip and silently corrupt the rep.
+    frame_count = len(poses_per_frame)
+    passer, target = assign_roles(track_people(poses_per_frame))
+    frames_landmarks = (
+        passer.aligned(frame_count) if passer is not None else [None] * frame_count
+    )
 
     # Only the tracked path reaches the scorer. Raw top-1 detections are
     # dominated by static clutter, and the tracker is what tells a ball from
     # a ceiling light.
     ball_track = track_ball(ball_candidates)
-    ball_detections = track_detections(ball_track, len(frames_landmarks))
+    ball_detections = track_detections(ball_track, frame_count)
 
     report = analyze_frames(
         frames_landmarks,
@@ -78,6 +96,8 @@ def analyze_video(video_path, ball_detector=None):
         frames_landmarks,
         ball_detections,
         ball_track,
+        passer,
+        target,
     )
 
 

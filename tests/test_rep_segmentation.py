@@ -70,6 +70,20 @@ class RepSegmentationTest(unittest.TestCase):
 
         self.assertEqual(len(reps), 1)
 
+    def test_broad_plateau_is_one_rep_not_several(self):
+        # One long crouch with two barely-higher moments in it, far enough
+        # apart to clear the separation window. They are above 75% of the peak,
+        # so only the valley rule stops them becoming two reps.
+        depths = [0.0] * 100
+        for index in range(20, 81):
+            depths[index] = 0.060
+        for index in list(range(28, 33)) + list(range(68, 73)):
+            depths[index] = 0.063
+
+        reps = analyze_frames(clip(depths), fps=30)["reps"]
+
+        self.assertEqual(len(reps), 1)
+
     def test_flat_clip_never_returns_zero_reps(self):
         reps = analyze_frames(clip([0.0] * 60), fps=30)["reps"]
 

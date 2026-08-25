@@ -17,7 +17,7 @@ VisionRunningMode = vision.RunningMode
 # 5. pass landmarks to angle_calculator.py
 
 class PoseExtractor: 
-    def __init__(self, mode = "video", model_path = "pose_landmarker_heavy.task"):
+    def __init__(self, mode = "video", model_path = "pose_landmarker_heavy.task", num_poses = 1):
         self.mode = mode.lower()
 
         #chooses mode of use
@@ -34,6 +34,7 @@ class PoseExtractor:
         options = PoseLandmarkerOptions(
             base_options=BaseOptions(model_asset_path=model_path),
             running_mode=running_mode,
+            num_poses=num_poses,
         )
 
         #create marker
@@ -68,6 +69,13 @@ class PoseExtractor:
         if not result.pose_landmarks:
             return None
         return result.pose_landmarks[0]
+
+
+    #every pose in the frame, in whatever order mediapipe returned them
+    def get_all_landmarks(self, result):
+        if not result.pose_landmarks:
+            return []
+        return list(result.pose_landmarks)
 
 
 
