@@ -23,12 +23,28 @@ def parse_args():
     )
     parser.add_argument(
         "--model",
-        default="yolov8n.pt",
-        help="Base YOLO model or checkpoint to fine-tune.",
+        default="yolov8s.pt",
+        help=(
+            "Checkpoint to fine-tune, or an architecture .yaml to build. "
+            "Use yolov8-p2.yaml for the small-object head: it adds a stride-4 "
+            "detection layer, and a volleyball is around 20-45 px at the "
+            "inference size."
+        ),
+    )
+    parser.add_argument(
+        "--weights",
+        default=None,
+        help=(
+            "Pretrained weights to transfer when --model is an architecture "
+            ".yaml. Defaults to the checkpoint matching the model's scale. "
+            "Ignored when --model is already a checkpoint."
+        ),
     )
     parser.add_argument("--epochs", default=100, type=int)
-    # Must match DEFAULT_IMAGE_SIZE in core/ball_detector.py.
-    parser.add_argument("--imgsz", default=960, type=int)
+    # Must match DEFAULT_IMAGE_SIZE in core/ball_detector.py. 1280 because the
+    # ball measured 32 px in a 1920-wide gym frame and 70 px close up, which
+    # lands at 21-47 px here.
+    parser.add_argument("--imgsz", default=1280, type=int)
     parser.add_argument("--device", default=default_device())
     parser.add_argument("--batch", default=8, type=int)
     parser.add_argument("--project", default=DEFAULT_PROJECT_DIR, type=Path)
@@ -41,6 +57,27 @@ def default_device():
     # Apple Silicon GPU. The first run of this script trained on CPU and took
     # three hours.
     return "mps" if torch.backends.mps.is_available() else "cpu"
+
+
+def build_model(model, weights=None):
+    """Load a checkpoint, or build an architecture and transfer weights into it."""
+    model = str(model)
+    built = YOLO(model)
+    if not model.endswith(".yaml"):
+        return built
+
+    # Only shape-matching layers are copied, so the scales have to agree.
+    # yolov8-p2.yaml builds at nano scale, and pairing it with yolov8s.pt
+    # transferred 45 of 437 tensors - effectively random init, which will not
+    # train on a few hundred images. Scale-matched, the same pair transfers
+    # 219. Deriving the default here means the mismatch cannot happen by hand.
+    return built.load(weights or matching_weights(model))
+
+
+def matching_weights(model_yaml):
+    """yolov8s-p2.yaml -> yolov8s.pt. Unscaled configs build at nano."""
+    stem = Path(model_yaml).stem.split("-")[0]
+    return f"{stem}.pt" if stem[-1] in "nsmlx" else f"{stem}n.pt"
 
 
 def find_data_yaml(dataset_dir):
@@ -56,7 +93,7 @@ def find_data_yaml(dataset_dir):
 
 def train(args):
     data_yaml = find_data_yaml(args.dataset_dir)
-    model = YOLO(args.model)
+    model = build_model(args.model, args.weights)
     train_result = model.train(
         data=str(data_yaml),
         epochs=args.epochs,

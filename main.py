@@ -18,7 +18,7 @@ PREDICTION_FRAMES = 12
 BALL_MODEL_PATH = "models/volleyball_ball/best.pt"
 BALL_TARGET_CLASSES = ("ball", "sports ball")
 BALL_CONFIDENCE = 0.15
-BALL_IMAGE_SIZE = 960
+BALL_IMAGE_SIZE = 1280
 FONT_PATHS = [
     "/Library/Fonts/Calibri.ttf",
     "/System/Library/Fonts/Supplemental/Calibri.ttf",

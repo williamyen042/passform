@@ -11,7 +11,7 @@ DEFAULT_CONFIDENCE = 0.15
 # Keep in sync with --imgsz in scripts/train_volleyball_ball_detector.py.
 # Inferring at a different size than training costs real recall on an object
 # this small.
-DEFAULT_IMAGE_SIZE = 960
+DEFAULT_IMAGE_SIZE = 1280
 DEFAULT_MIN_BOX_AREA = 0.00002
 DEFAULT_MAX_BOX_AREA = 0.03
 DEFAULT_MAX_ASPECT_RATIO = 4.0
