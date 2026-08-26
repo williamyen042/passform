@@ -763,6 +763,29 @@ def _combined_rep_signal(hip_y, platform_score, valid_indices):
     return (0.6 * hip_component) + (0.4 * platform_component)
 
 
+def wrists_above_shoulders(landmarks):
+    """How far the hands are raised above the shoulders, in torso lengths.
+
+    Zero whenever the hands are at or below shoulder height, so a pass reads as
+    zero and an overhead play reads positive. Normalized by torso length to
+    stay scale free.
+    """
+    if not _has_full_pose(landmarks):
+        return float("nan")
+
+    torso_length = max(
+        distance(landmarks[LEFT_SIDE["shoulder"]], landmarks[LEFT_SIDE["hip"]]),
+        0.001,
+    )
+    shoulder_y = (
+        landmarks[LEFT_SIDE["shoulder"]].y + landmarks[RIGHT_SIDE["shoulder"]].y
+    ) / 2.0
+    wrist_y = (
+        landmarks[LEFT_SIDE["wrist"]].y + landmarks[RIGHT_SIDE["wrist"]].y
+    ) / 2.0
+    return max((shoulder_y - wrist_y) / torso_length, 0.0)
+
+
 def platform_score(landmarks):
     """How much a pose looks like a formed passing platform, 0-100.
 
@@ -794,20 +817,7 @@ def platform_score(landmarks):
     # A pass is played below the shoulders. Sets, serves and spikes are not,
     # and without this term an overhead jump serve scores as a passing rep:
     # the hips are low on landing and the arms briefly look like a platform.
-    torso_length = max(
-        distance(
-            landmarks[LEFT_SIDE["shoulder"]],
-            landmarks[LEFT_SIDE["hip"]],
-        ),
-        0.001,
-    )
-    shoulder_y = (
-        landmarks[LEFT_SIDE["shoulder"]].y + landmarks[RIGHT_SIDE["shoulder"]].y
-    ) / 2.0
-    wrist_y = (
-        landmarks[LEFT_SIDE["wrist"]].y + landmarks[RIGHT_SIDE["wrist"]].y
-    ) / 2.0
-    wrists_above_shoulders = max((shoulder_y - wrist_y) / torso_length, 0.0)
+    hand_height = wrists_above_shoulders(landmarks)
 
     arm_torso_angle = float(np.nanmean([
         joint_angle(
@@ -826,7 +836,7 @@ def platform_score(landmarks):
         _score_max_allowed(wrist_gap, 0.75, 2.0),
         _score_max_allowed(parallel_delta, 15, 60),
         _score_target_range(arm_torso_angle, 55, 120, 15, 165),
-        _score_max_allowed(wrists_above_shoulders, 0.0, 0.5),
+        _score_max_allowed(hand_height, 0.0, 0.5),
     ]))
 
 

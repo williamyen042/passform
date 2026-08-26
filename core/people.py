@@ -15,7 +15,12 @@ from typing import List, Optional
 
 import numpy as np
 
-from core.scorer import LEFT_SIDE, RIGHT_SIDE, platform_score
+from core.scorer import (
+    LEFT_SIDE,
+    RIGHT_SIDE,
+    platform_score,
+    wrists_above_shoulders,
+)
 
 
 # Normalized units per frame. People walk; they do not teleport.
@@ -23,6 +28,10 @@ MAX_PERSON_STEP = 0.08
 # Frames a person may go undetected before their track is closed.
 MAX_PERSON_GAP = 8
 MIN_PERSON_FRAMES = 5
+# Hands this far above the shoulders means the target is playing the ball.
+TARGET_PLAY_HAND_HEIGHT = 0.35
+# Nothing that arrives later than this belongs to the pass we just measured.
+MAX_FLIGHT_SECONDS = 2.5
 
 
 @dataclass
@@ -138,6 +147,30 @@ def assign_roles(tracks):
     others = [track for track in tracks if track is not passer]
     target = max(others, key=len) if others else None
     return passer, target
+
+
+def arrival_frame(target, contact_frame, fps):
+    """First frame after contact where the target reaches up to play the ball.
+
+    The target raises their hands to set or catch it, so the wrists crossing
+    above the shoulders marks the arrival. That is the same geometry that tells
+    a pass from an overhead action for the passer, read the other way round.
+
+    ponytail: pose only, because it works with no ball track at all. Once the
+    detector can see the ball, the arrival is just where the outgoing arc
+    reaches the target and this becomes the fallback.
+    """
+    if target is None:
+        return None
+
+    horizon = contact_frame + int(round(MAX_FLIGHT_SECONDS * max(fps, 1)))
+    for index, pose in zip(target.frame_indices, target.poses):
+        if index <= contact_frame or index > horizon:
+            continue
+        height = wrists_above_shoulders(pose)
+        if not math.isnan(height) and height >= TARGET_PLAY_HAND_HEIGHT:
+            return index
+    return None
 
 
 def target_displacement(target, contact_frame, arrival_frame):
