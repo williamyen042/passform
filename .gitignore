@@ -36,3 +36,7 @@ output/*
 .DS_Store
 .vscode/
 .idea/
+
+# Labelling artefacts
+data/*.proposals.json
+frames/
