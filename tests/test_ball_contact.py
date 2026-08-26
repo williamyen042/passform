@@ -46,12 +46,24 @@ def ball(frame_index, center, confidence=0.9):
     )
 
 
+CONTACT = 20
+CLIP_FRAMES = 41
+
+
+def approach_and_leave():
+    """Ball falls toward the platform at y=0.62, then leaves again."""
+    return [
+        max(0.62 - 0.025 * abs(frame - CONTACT), 0.05)
+        for frame in range(CLIP_FRAMES)
+    ]
+
+
 class BallContactTest(unittest.TestCase):
     def setUp(self):
-        self.frames = [pose_frame() for _ in range(11)]
+        self.frames = [pose_frame() for _ in range(CLIP_FRAMES)]
 
     def test_clean_approach_contact_leave_selects_true_contact(self):
-        y_values = [0.10, 0.20, 0.30, 0.42, 0.54, 0.62, 0.54, 0.42, 0.30, 0.20, 0.10]
+        y_values = approach_and_leave()
         detections = [
             ball(index, (0.50, y_value))
             for index, y_value in enumerate(y_values)
@@ -61,22 +73,22 @@ class BallContactTest(unittest.TestCase):
         rep = report["reps"][0]
 
         self.assertEqual(rep["contact_source"], "ball")
-        self.assertEqual(rep["frame_center"], 5)
+        self.assertEqual(rep["frame_center"], CONTACT)
         self.assertEqual(rep["ball_confidence"], 0.9)
 
     def test_short_missing_detection_gap_still_selects_nearby_contact(self):
-        y_values = [0.10, 0.20, 0.30, 0.42, 0.54, 0.62, 0.54, 0.42, 0.30, 0.20, 0.10]
+        y_values = approach_and_leave()
         detections = [
             ball(index, (0.50, y_value))
             for index, y_value in enumerate(y_values)
         ]
-        detections[5] = None
+        detections[CONTACT] = None
 
         report = analyze_frames(self.frames, fps=30, ball_detections=detections)
         rep = report["reps"][0]
 
         self.assertEqual(rep["contact_source"], "ball")
-        self.assertIn(rep["frame_center"], {4, 5, 6})
+        self.assertIn(rep["frame_center"], {CONTACT - 1, CONTACT, CONTACT + 1})
 
     def test_far_noisy_ball_falls_back_to_pose_proxy(self):
         detections = [

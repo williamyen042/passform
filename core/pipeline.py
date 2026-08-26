@@ -39,11 +39,31 @@ class VideoAnalysis(NamedTuple):
 DEFAULT_NUM_POSES = 1
 
 
-def analyze_video(video_path, ball_detector=None, num_poses=DEFAULT_NUM_POSES):
-    """Decode a clip, extract pose (and optionally the ball), then score it."""
+def analyze_video(
+    video_path,
+    ball_detector=None,
+    num_poses=DEFAULT_NUM_POSES,
+    rotate=None,
+    start_frame=0,
+    max_frames=None,
+):
+    """Decode a clip, extract pose (and optionally the ball), then score it.
+
+    rotate takes a cv2.ROTATE_* constant. Phone footage is regularly written
+    sideways with no orientation metadata for OpenCV to act on, and a sideways
+    athlete wrecks both pose landmarks and the vertical axis the ball tracker
+    assumes gravity runs along.
+
+    start_frame and max_frames exist because real sessions are minutes long and
+    reprocessing all of it to look at one rally is a waste. Frame indices in
+    the returned report are relative to start_frame.
+    """
     capture = cv2.VideoCapture(str(video_path))
     if not capture.isOpened():
         raise FileNotFoundError(f"Could not open video: {video_path}")
+
+    if start_frame:
+        capture.set(cv2.CAP_PROP_POS_FRAMES, int(start_frame))
 
     extractor = PoseExtractor(mode="video", num_poses=num_poses)
     fps = capture.get(cv2.CAP_PROP_FPS) or 30
@@ -52,9 +72,15 @@ def analyze_video(video_path, ball_detector=None, num_poses=DEFAULT_NUM_POSES):
 
     try:
         while True:
+            if max_frames is not None and len(poses_per_frame) >= max_frames:
+                break
+
             success, frame = capture.read()
             if not success:
                 break
+
+            if rotate is not None:
+                frame = cv2.rotate(frame, rotate)
 
             frame_index = len(poses_per_frame)
             ball_candidates.append(

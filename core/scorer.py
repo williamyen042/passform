@@ -83,8 +83,11 @@ def analyze_frames(frames_landmarks, fps=30, ball_detections=None):
         fps,
     )
     reps = []
-    for rep_index, contact in enumerate(contacts, start=1):
-        rep = _score_rep(rep_index, contact["frame_index"], frames, fps, contact)
+    for contact in contacts:
+        # Numbered after the drop, not before: a rep rejected for running off
+        # the end of the clip used to leave a hole in the sequence, and these
+        # indices become rep ids in the dataset.
+        rep = _score_rep(len(reps) + 1, contact["frame_index"], frames, fps, contact)
         if rep is not None:
             reps.append(rep)
 
@@ -110,6 +113,15 @@ def _score_rep(rep_index, frame_center, frames, fps, contact=None):
     post_contact_frames = max(1, int(round(POST_CONTACT_SECONDS * fps)))
     kinetic_pre_frames = max(1, int(round(KINETIC_PRE_CONTACT_SECONDS * fps)))
     kinetic_post_frames = max(1, int(round(KINETIC_POST_CONTACT_SECONDS * fps)))
+
+    # The wider window is context and may legitimately be clipped, but the
+    # kinetic window is the measurement itself. Without it there is nothing to
+    # measure, and scoring anyway produces a confident number from almost no
+    # data: murphy1 reported a rep at frame 0 this way, with no approach at all.
+    if frame_center < kinetic_pre_frames:
+        return None
+    if frame_center > len(frames) - 1 - kinetic_post_frames:
+        return None
 
     frame_start = max(0, frame_center - pre_contact_frames)
     frame_end = min(len(frames) - 1, frame_center + post_contact_frames)
@@ -553,7 +565,9 @@ def _detect_pose_contact_centers(rep_signal, valid_indices, separation):
     valid_values = rep_signal[valid_indices]
     best = float(np.nanmax(valid_values))
     if math.isclose(best, float(np.nanmin(valid_values))):
-        return [int(valid_indices[int(np.nanargmax(valid_values))])]
+        # Nothing to go on. The middle of the clip is the least bad guess, and
+        # unlike argmax (which lands on frame 0) it has a window either side.
+        return [int(valid_indices[len(valid_indices) // 2])]
 
     floor = best * REP_PEAK_MIN_FRACTION
     remaining = {
@@ -777,6 +791,24 @@ def platform_score(landmarks):
         landmarks[RIGHT_SIDE["wrist"]],
     )
     parallel_delta = axis_angle_difference(left_forearm, right_forearm)
+    # A pass is played below the shoulders. Sets, serves and spikes are not,
+    # and without this term an overhead jump serve scores as a passing rep:
+    # the hips are low on landing and the arms briefly look like a platform.
+    torso_length = max(
+        distance(
+            landmarks[LEFT_SIDE["shoulder"]],
+            landmarks[LEFT_SIDE["hip"]],
+        ),
+        0.001,
+    )
+    shoulder_y = (
+        landmarks[LEFT_SIDE["shoulder"]].y + landmarks[RIGHT_SIDE["shoulder"]].y
+    ) / 2.0
+    wrist_y = (
+        landmarks[LEFT_SIDE["wrist"]].y + landmarks[RIGHT_SIDE["wrist"]].y
+    ) / 2.0
+    wrists_above_shoulders = max((shoulder_y - wrist_y) / torso_length, 0.0)
+
     arm_torso_angle = float(np.nanmean([
         joint_angle(
             landmarks[LEFT_SIDE["hip"]],
@@ -794,6 +826,7 @@ def platform_score(landmarks):
         _score_max_allowed(wrist_gap, 0.75, 2.0),
         _score_max_allowed(parallel_delta, 15, 60),
         _score_target_range(arm_torso_angle, 55, 120, 15, 165),
+        _score_max_allowed(wrists_above_shoulders, 0.0, 0.5),
     ]))
 
 
