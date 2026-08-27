@@ -1,3 +1,5 @@
+import sys
+
 import cv2
 import numpy as np
 from pathlib import Path
@@ -10,8 +12,11 @@ from core.ball_tracker import contact_frames, evaluate_fit, fit_segment, segment
 from core.pipeline import analyze_video, rep_for_frame
 
 VIDEO_PATH = "data/sample_video2.mp4"
-OUTPUT_PATH = "output/passform_scored.mp4"
+OUTPUT_DIR = Path("output")
 SAVE_OUTPUT_VIDEO = True
+# How long the last frame stays up once playback ends, so the numbers can
+# actually be read. Any key closes it sooner.
+HOLD_SECONDS = 6
 BALL_MODEL_PATH = "models/volleyball_ball/best.pt"
 BALL_TARGET_CLASSES = ("ball", "sports ball")
 BALL_CONFIDENCE = 0.15
@@ -430,6 +435,10 @@ def render(video_path, analysis, output_path=None):
         writer = cv2.VideoWriter(str(output_path), cv2.VideoWriter_fourcc(*"mp4v"),
                                  analysis.fps, CANVAS_SIZE)
 
+    # Play at the clip's own speed rather than as fast as frames compose.
+    delay = max(1, int(round(1000 / max(analysis.fps, 1))))
+    quit_early = False
+
     try:
         for frame_index in range(len(analysis.frames_landmarks)):
             success, frame = capture.read()
@@ -443,8 +452,13 @@ def render(video_path, analysis, output_path=None):
             if writer is not None:
                 writer.write(canvas)
             cv2.imshow("PassForm", canvas)
-            if cv2.waitKey(1) & 0xFF == ord("q"):
+            if cv2.waitKey(delay) & 0xFF == ord("q"):
+                quit_early = True
                 break
+
+        if not quit_early:
+            print(f"Holding the last frame for {HOLD_SECONDS}s. Press any key to close.")
+            cv2.waitKey(HOLD_SECONDS * 1000)
     finally:
         capture.release()
         if writer is not None:
@@ -452,20 +466,28 @@ def render(video_path, analysis, output_path=None):
         cv2.destroyAllWindows()
 
 
-def main():
+def main(video_path=None):
+    video_path = Path(video_path or VIDEO_PATH)
+    if not video_path.exists():
+        raise SystemExit(f"No such video: {video_path}")
+
     ball_detector = BallDetector(
         model_path=BALL_MODEL_PATH,
         target_classes=BALL_TARGET_CLASSES,
         confidence=BALL_CONFIDENCE,
         image_size=BALL_IMAGE_SIZE,
     )
-    analysis = analyze_video(VIDEO_PATH, ball_detector=ball_detector)
+    print(f"Analysing {video_path} ...")
+    analysis = analyze_video(video_path, ball_detector=ball_detector)
 
     pprint(analysis.report)
-    render(VIDEO_PATH, analysis, output_path=OUTPUT_PATH if SAVE_OUTPUT_VIDEO else None)
+    # Named after the clip so analysing a second video does not quietly
+    # overwrite the first one's output.
+    output_path = OUTPUT_DIR / f"{video_path.stem}_scored.mp4"
+    render(video_path, analysis, output_path=output_path if SAVE_OUTPUT_VIDEO else None)
     if SAVE_OUTPUT_VIDEO:
-        print(f"Saved scored video to {OUTPUT_PATH}")
+        print(f"Saved scored video to {output_path}")
 
 
 if __name__ == "__main__":
-    main()
+    main(sys.argv[1] if len(sys.argv) > 1 else None)
