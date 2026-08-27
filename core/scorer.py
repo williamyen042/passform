@@ -430,29 +430,33 @@ def _form_score_to_pass_quality(score):
 
 
 def _build_critiques(measurements, stability, integrity, kinetic):
+    """Faults first, worst dimension first, with any praise last.
+
+    Callers show critiques[0] and nothing else, and these used to come out in
+    source order with the elbow compliment written first. A rep with good
+    elbows therefore displayed praise while five real faults sat unread behind
+    it.
+    """
+    ranked = sorted(
+        (
+            (stability, _stability_critiques(measurements)),
+            (integrity, _integrity_critiques(measurements)),
+            (kinetic, _kinetic_critiques(measurements, kinetic)),
+        ),
+        key=lambda item: item[0],
+    )
+    critiques = [note for _, notes in ranked for note in notes]
+    return critiques + _praise(measurements, stability, integrity, kinetic)
+
+
+def _integrity_critiques(measurements):
     critiques = []
     elbow_angle = _measurement(measurements, "elbow_angle")
     arm_torso_angle = _measurement(measurements, "arm_torso_angle")
     forearm_parallel_delta = _measurement(measurements, "forearm_parallel_delta")
     wrist_gap_ratio = _measurement(measurements, "wrist_gap_ratio")
-    knee_angle = _measurement(measurements, "knee_angle")
-    torso_angle = _measurement(measurements, "torso_angle")
-    stance_width_ratio = _measurement(measurements, "stance_width_ratio")
-    balance_offset = _measurement(measurements, "balance_offset")
-    head_y_delta = _measurement(measurements, "head_y_delta")
-    shoulder_hip_offset = _measurement(measurements, "shoulder_hip_offset")
-    body_rise = _measurement(measurements, "body_rise")
-    shoulder_hip_sync_error = _measurement(measurements, "shoulder_hip_sync_error")
-    platform_shoulder_sync_error = _measurement(
-        measurements,
-        "platform_shoulder_sync_error",
-    )
-    elbow_delta = _measurement(measurements, "elbow_delta")
-    forearm_angle_delta = _measurement(measurements, "forearm_angle_delta")
 
-    if elbow_angle >= 170:
-        critiques.append("Strong elbow extension through the platform.")
-    elif not math.isnan(elbow_angle):
+    if elbow_angle < 170 and not math.isnan(elbow_angle):
         critiques.append("Lock the elbows more so the platform stays firm.")
 
     if forearm_parallel_delta > 25:
@@ -465,6 +469,19 @@ def _build_critiques(measurements, stability, integrity, kinetic):
         critiques.append("Hold the platform away from the stomach before contact.")
     elif arm_torso_angle > 130:
         critiques.append("Set the platform closer to a right angle with the torso.")
+
+    return critiques
+
+
+def _stability_critiques(measurements):
+    critiques = []
+    knee_angle = _measurement(measurements, "knee_angle")
+    torso_angle = _measurement(measurements, "torso_angle")
+    stance_width_ratio = _measurement(measurements, "stance_width_ratio")
+    balance_offset = _measurement(measurements, "balance_offset")
+    head_y_delta = _measurement(measurements, "head_y_delta")
+    shoulder_hip_offset = _measurement(measurements, "shoulder_hip_offset")
+    body_rise = _measurement(measurements, "body_rise")
 
     if knee_angle > 160:
         critiques.append("Bend the knees more before contact to load the legs.")
@@ -483,17 +500,6 @@ def _build_critiques(measurements, stability, integrity, kinetic):
     elif balance_offset > 0.35:
         critiques.append("Center your weight more evenly over your base before contact.")
 
-    if kinetic < 75:
-        critiques.append("Keep the platform connected to the legs through contact.")
-    if shoulder_hip_sync_error > 0.16:
-        critiques.append("Shoulders rose separately from the hips; drive more from the legs.")
-    if platform_shoulder_sync_error > 0.18:
-        critiques.append("Platform moved independently of the shoulders during contact.")
-    if elbow_delta > 30:
-        critiques.append("Elbow angle changed too much at contact; keep the platform locked.")
-    if forearm_angle_delta > 35:
-        critiques.append("Forearms rotated through contact; hold the platform angle steady.")
-
     if stance_width_ratio < 1.0:
         critiques.append("Widen the stance for a more stable passing base.")
     elif stance_width_ratio > 2.8:
@@ -505,10 +511,42 @@ def _build_critiques(measurements, stability, integrity, kinetic):
     if shoulder_hip_offset > 1.2:
         critiques.append("Keep shoulders and hips more connected through the pass.")
 
-    if stability >= 85 and integrity >= 85 and kinetic >= 85:
-        critiques.append("Balanced rep with stable legs, locked elbows, and quiet shoulders.")
+    return critiques
+
+
+def _kinetic_critiques(measurements, kinetic):
+    critiques = []
+    shoulder_hip_sync_error = _measurement(measurements, "shoulder_hip_sync_error")
+    platform_shoulder_sync_error = _measurement(
+        measurements,
+        "platform_shoulder_sync_error",
+    )
+    elbow_delta = _measurement(measurements, "elbow_delta")
+    forearm_angle_delta = _measurement(measurements, "forearm_angle_delta")
+
+    if kinetic < 75:
+        critiques.append("Keep the platform connected to the legs through contact.")
+    if shoulder_hip_sync_error > 0.16:
+        critiques.append("Shoulders rose separately from the hips; drive more from the legs.")
+    if platform_shoulder_sync_error > 0.18:
+        critiques.append("Platform moved independently of the shoulders during contact.")
+    if elbow_delta > 30:
+        critiques.append("Elbow angle changed too much at contact; keep the platform locked.")
+    if forearm_angle_delta > 35:
+        critiques.append("Forearms rotated through contact; hold the platform angle steady.")
 
     return critiques
+
+
+def _praise(measurements, stability, integrity, kinetic):
+    """Only ever shown once the faults above it have run out."""
+    notes = []
+    elbow_angle = _measurement(measurements, "elbow_angle")
+    if elbow_angle >= 170:
+        notes.append("Strong elbow extension through the platform.")
+    if stability >= 85 and integrity >= 85 and kinetic >= 85:
+        notes.append("Balanced rep with stable legs, locked elbows, and quiet shoulders.")
+    return notes
 
 
 def _measurement(measurements, key):
