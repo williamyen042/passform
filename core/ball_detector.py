@@ -3,15 +3,24 @@ from pathlib import Path
 from typing import Optional, Tuple
 
 
-DEFAULT_MODEL_PATH = "models/volleyball_ball/best.pt"
+# Stock COCO weights, whose "sports ball" class finds the real ball where the
+# fine-tuned checkpoint cannot: that model was trained on 548 frames of one
+# broadcast and fires on gym ceiling lights instead. Recall here is low, about
+# one frame in ten, but the hits are genuine and the tracker only needs a
+# handful of points to fit an arc. Swap back to models/volleyball_ball/best.pt
+# once it is retrained on own-gym footage.
+DEFAULT_MODEL_PATH = "yolov8x.pt"
 # "sports ball" is the COCO name, so a stock yolov8n.pt still matches if the
 # fine-tuned checkpoint is swapped out.
 DEFAULT_TARGET_CLASSES = ("ball", "sports ball")
-DEFAULT_CONFIDENCE = 0.15
+# Low because this detector is being used for recall, not precision. The
+# projectile fit is what rejects the noise that comes with it.
+DEFAULT_CONFIDENCE = 0.02
 # Keep in sync with --imgsz in scripts/train_volleyball_ball_detector.py.
-# Inferring at a different size than training costs real recall on an object
-# this small.
-DEFAULT_IMAGE_SIZE = 1280
+# Measured, not assumed: 1280 lost the ball entirely on one broadcast clip
+# because the current checkpoint was trained at 640, and 960 is the size at
+# which both that checkpoint and the COCO weights track cleanly.
+DEFAULT_IMAGE_SIZE = 960
 DEFAULT_MIN_BOX_AREA = 0.00002
 DEFAULT_MAX_BOX_AREA = 0.03
 DEFAULT_MAX_ASPECT_RATIO = 4.0

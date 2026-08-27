@@ -29,17 +29,22 @@ import numpy as np
 MAX_SPEED_PER_FRAME = 0.12
 # How long a track may coast through an occlusion before it is closed.
 MAX_GAP_FRAMES = 3
-# A real pass arc spans at least half a second; measured ball tracks ran
-# 27-97 frames, measured junk ran 7-20.
-MIN_TRACK_FRAMES = 8
+# Low enough for a sparse detector. A stock COCO model finds the ball on only
+# a handful of frames per clip, but those frames trace the real arc, and six
+# points are plenty to fit one.
+MIN_TRACK_FRAMES = 5
 # A static false positive never travels this far; a real pass always does.
 MIN_TRACK_DISPLACEMENT = 0.08
-# RMS fit error in normalized units, above which a path is not projectile-like.
-# Calibrated, not guessed: real ball tracks on in-domain footage measured
-# 0.0026-0.0043 and gym-ceiling-light tracks measured 0.0152-0.0601, so this
-# sits in the gap with roughly 2x margin either side. Re-measure once the
-# detector is retrained on own-gym footage.
-MAX_FIT_RESIDUAL = 0.008
+# Fit error as a fraction of how far the track travelled, above which a path
+# is not projectile-like.
+#
+# Relative rather than absolute, because absolute does not survive a change of
+# detector. Measured across twelve tracks from two detectors: real arcs land
+# at 0.9-3.9% and junk at 8.0-22.0%, so this sits in the gap with about 1.5x
+# margin either side. In absolute terms those same tracks overlap - the
+# sparsest real arc scores 0.0130 and the tightest junk 0.0152 - which would
+# have made a fixed threshold pick one detector and break the other.
+MAX_RELATIVE_RESIDUAL = 0.06
 # Minimum vertical velocity flip for a reversal to count as contact rather
 # than detector jitter.
 MIN_CONTACT_REVERSAL = 0.008
@@ -151,7 +156,9 @@ def select_flight_track(tracks):
         if track.displacement() < MIN_TRACK_DISPLACEMENT:
             continue
         residual = fit_residual(track)
-        if residual is None or residual > MAX_FIT_RESIDUAL:
+        if residual is None:
+            continue
+        if residual / max(track.displacement(), 1e-6) > MAX_RELATIVE_RESIDUAL:
             continue
         survivors.append(track)
 

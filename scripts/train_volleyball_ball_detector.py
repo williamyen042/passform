@@ -41,10 +41,9 @@ def parse_args():
         ),
     )
     parser.add_argument("--epochs", default=100, type=int)
-    # Must match DEFAULT_IMAGE_SIZE in core/ball_detector.py. 1280 because the
-    # ball measured 32 px in a 1920-wide gym frame and 70 px close up, which
-    # lands at 21-47 px here.
-    parser.add_argument("--imgsz", default=1280, type=int)
+    # Must match DEFAULT_IMAGE_SIZE in core/ball_detector.py, and moving one
+    # without the other costs real recall on an object this small.
+    parser.add_argument("--imgsz", default=960, type=int)
     parser.add_argument("--device", default=default_device())
     parser.add_argument("--batch", default=8, type=int)
     parser.add_argument("--project", default=DEFAULT_PROJECT_DIR, type=Path)

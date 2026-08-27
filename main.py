@@ -17,10 +17,10 @@ SAVE_OUTPUT_VIDEO = True
 # How long the last frame stays up once playback ends, so the numbers can
 # actually be read. Any key closes it sooner.
 HOLD_SECONDS = 6
-BALL_MODEL_PATH = "models/volleyball_ball/best.pt"
+BALL_MODEL_PATH = None      # None uses the detector default
 BALL_TARGET_CLASSES = ("ball", "sports ball")
-BALL_CONFIDENCE = 0.15
-BALL_IMAGE_SIZE = 1280
+BALL_CONFIDENCE = 0.02
+BALL_IMAGE_SIZE = 960
 
 # The clip is letterboxed into a fixed box so the output size never depends on
 # the input, which keeps portrait and landscape footage on the same layout.
@@ -488,12 +488,14 @@ def main(video_path=None):
     if not video_path.exists():
         raise SystemExit(f"No such video: {video_path}")
 
-    ball_detector = BallDetector(
-        model_path=BALL_MODEL_PATH,
-        target_classes=BALL_TARGET_CLASSES,
-        confidence=BALL_CONFIDENCE,
-        image_size=BALL_IMAGE_SIZE,
-    )
+    detector_options = {
+        "target_classes": BALL_TARGET_CLASSES,
+        "confidence": BALL_CONFIDENCE,
+        "image_size": BALL_IMAGE_SIZE,
+    }
+    if BALL_MODEL_PATH:
+        detector_options["model_path"] = BALL_MODEL_PATH
+    ball_detector = BallDetector(**detector_options)
     print(f"Analysing {video_path} ...")
     analysis = analyze_video(video_path, ball_detector=ball_detector)
 
