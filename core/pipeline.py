@@ -128,9 +128,15 @@ def analyze_video(
 
 
 def rep_for_frame(report, frame_index):
-    """Return the rep being shown at a given frame, or None before the first."""
+    """Return the rep to display at a frame, or None before the first contact.
+
+    Keyed on the contact frame rather than the start of the measurement
+    window. The window opens half a second before contact, so keying on that
+    put a finished score on screen while the ball was still in the air, which
+    reads as though the pass had been graded before it happened.
+    """
     current = None
     for rep in report.get("reps", []):
-        if rep["frame_start"] <= frame_index:
+        if rep["frame_center"] <= frame_index:
             current = rep
     return current

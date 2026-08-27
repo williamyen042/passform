@@ -371,20 +371,37 @@ def draw_strip(canvas, rep, text):
     text.add("TARGET", (edge, y0 + 16), FONT_LABEL, MUTED, align="right")
 
     y = y0 + 50
-    for label, key, limit, shown_target in (
-        ("Wrist gap", "wrist_gap_ratio", 0.65, "under 0.65"),
-        ("Forearm spread", "forearm_parallel_delta", 10, "under 10\u00b0"),
-    ):
+    y = _measure_rows(canvas, rep, text, panel_x, edge, y, (
+        ("Wrist gap", "wrist_gap_ratio", (None, 0.65), "under 0.65", 2),
+        ("Forearm spread", "forearm_parallel_delta", (None, 10), "under 10\u00b0", 0),
+    ))
+
+    # Centre of gravity is two thirds of the stability score and was visible
+    # nowhere, which made a low Stability number impossible to act on.
+    y += 18
+    text.add("CENTRE OF GRAVITY", (panel_x, y), FONT_LABEL, ACCENT)
+    y += 34
+    _measure_rows(canvas, rep, text, panel_x, edge, y, (
+        ("Hip depth", "cog_ratio", (0.32, 0.52), "0.32\u20130.52", 2),
+        ("Weight offset", "balance_offset", (None, 0.22), "under 0.22", 2),
+    ))
+
+
+def _measure_rows(canvas, rep, text, x, edge, y, rows):
+    """One row per measurement: name, value coloured by its band, and the band."""
+    for label, key, (low, high), shown_target, places in rows:
         value = rep["measurements"].get(key) if rep else None
-        text.add(label, (panel_x, y), FONT_BODY, INK)
+        text.add(label, (x, y), FONT_BODY, INK)
         if value is None:
-            text.add("--", (panel_x + 210, y), FONT_BODY, MUTED, align="right")
+            text.add("--", (x + 210, y), FONT_BODY, MUTED, align="right")
         else:
-            shown = f"{value:.2f}" if key == "wrist_gap_ratio" else f"{value:.0f}\u00b0"
-            text.add(shown, (panel_x + 210, y), FONT_BODY,
-                     INK if value <= limit else WARN, align="right")
+            inside = (low is None or value >= low) and value <= high
+            shown = f"{value:.{places}f}" + ("\u00b0" if places == 0 else "")
+            text.add(shown, (x + 210, y), FONT_BODY,
+                     INK if inside else WARN, align="right")
         text.add(shown_target, (edge, y), FONT_BODY, MUTED, align="right")
         y += 34
+    return y
 
 
 def compose(frame, analysis, frame_index, rep, thumb, contacts):
