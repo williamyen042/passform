@@ -26,6 +26,21 @@ DEFAULT_MAX_BOX_AREA = 0.03
 DEFAULT_MAX_ASPECT_RATIO = 4.0
 
 
+def default_device():
+    """Apple Silicon GPU when there is one.
+
+    Ultralytics picks CPU for inference unless told otherwise, and on this
+    machine that measured 483 ms per frame against 99 ms on the GPU.
+    """
+    try:
+        import torch
+    except ImportError:
+        return "cpu"
+    if torch.backends.mps.is_available():
+        return "mps"
+    return "cuda" if torch.cuda.is_available() else "cpu"
+
+
 @dataclass(frozen=True)
 class BallDetection:
     frame_index: int
@@ -46,6 +61,7 @@ class BallDetector:
         min_box_area=DEFAULT_MIN_BOX_AREA,
         max_box_area=DEFAULT_MAX_BOX_AREA,
         max_aspect_ratio=DEFAULT_MAX_ASPECT_RATIO,
+        device=None,
     ):
         try:
             from ultralytics import YOLO
@@ -74,6 +90,7 @@ class BallDetector:
         self.min_box_area = min_box_area
         self.max_box_area = max_box_area
         self.max_aspect_ratio = max_aspect_ratio
+        self.device = device or default_device()
 
     def detect(self, frame, frame_index):
         """Best single candidate for this frame, or None."""
@@ -96,6 +113,7 @@ class BallDetector:
             frame,
             conf=self.confidence,
             imgsz=self.image_size,
+            device=self.device,
             verbose=False,
         )
         if not results:
