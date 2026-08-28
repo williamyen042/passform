@@ -38,6 +38,15 @@ MAX_FLIGHT_SECONDS = 2.5
 class PersonTrack:
     frame_indices: List[int] = field(default_factory=list)
     poses: List[list] = field(default_factory=list)
+    # Normalized xyxy per frame, present only when a detector supplied them.
+    # The passer's boxes are what the finer pose pass crops to.
+    boxes: List[tuple] = field(default_factory=list)
+
+    def box(self, frame_index):
+        for index, box in zip(self.frame_indices, self.boxes):
+            if index == frame_index:
+                return box
+        return None
 
     def __len__(self):
         return len(self.poses)
@@ -82,6 +91,24 @@ class PersonTrack:
             if index == frame_index:
                 return _hip_midpoint(pose)
         return None
+
+
+def tracks_from_detector(people_per_frame):
+    """Build one track per tracking id, rather than re-deriving identity.
+
+    YOLO-pose already follows people between frames, so the proximity linking
+    below is only needed for pose sources that do not.
+    """
+    tracks = {}
+    for people in people_per_frame:
+        for person_id, person in (people or {}).items():
+            track = tracks.setdefault(person_id, PersonTrack())
+            track.frame_indices.append(person.frame_index)
+            track.poses.append(person.pose)
+            track.boxes.append(person.box)
+
+    kept = [t for t in tracks.values() if len(t) >= MIN_PERSON_FRAMES]
+    return sorted(kept, key=len, reverse=True)
 
 
 def track_people(poses_per_frame):

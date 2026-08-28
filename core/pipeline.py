@@ -10,8 +10,9 @@ from typing import List, NamedTuple, Optional
 import cv2
 
 from core.ball_tracker import track_ball, track_detections
-from core.people import assign_roles, track_people
-from core.pose_extractor import PoseExtractor
+from core.people import assign_roles, tracks_from_detector
+from core.people_detector import PeopleDetector
+from core.pose_extractor import PoseExtractor, square_crop, to_frame_coordinates
 from core.scorer import analyze_frames
 
 
@@ -32,77 +33,54 @@ class VideoAnalysis(NamedTuple):
     target: Optional[object] = None
 
 
-# Opt in to 2 only when a second person is genuinely in frame. MediaPipe
-# returns slightly different landmarks in multi-pose mode even when it still
-# finds exactly one person, and on single-person clips that shifted detected
-# contact by up to 31 frames.
-DEFAULT_NUM_POSES = 1
+# Every pose the finer pass reads is a crop of one person, so MediaPipe is
+# only ever asked for one. Finding the others is YOLO-pose's job.
+SINGLE_POSE = 1
 
 
 def analyze_video(
     video_path,
     ball_detector=None,
-    num_poses=DEFAULT_NUM_POSES,
+    people_detector=None,
     rotate=None,
     start_frame=0,
     max_frames=None,
 ):
-    """Decode a clip, extract pose (and optionally the ball), then score it.
+    """Decode a clip, find the people, measure the passer, then score them.
 
-    rotate takes a cv2.ROTATE_* constant. Phone footage is regularly written
-    sideways with no orientation metadata for OpenCV to act on, and a sideways
-    athlete wrecks both pose landmarks and the vertical axis the ball tracker
-    assumes gravity runs along.
+    Two passes over the video. The first finds every person with YOLO-pose and
+    the ball with the ball detector; only then is it known which person is
+    passing. The second crops to that person and reads their pose at full
+    detail with MediaPipe, which measures joints more precisely and more
+    steadily than YOLO-pose does - elbow angles differ by about 14 degrees
+    between the two, and MediaPipe's frame-to-frame jitter is half as large.
 
-    start_frame and max_frames exist because real sessions are minutes long and
+    rotate takes a cv2.ROTATE_* constant, for the phone footage that is
+    written sideways with no orientation metadata OpenCV will act on.
+    start_frame and max_frames exist because real sessions run for minutes and
     reprocessing all of it to look at one rally is a waste. Frame indices in
     the returned report are relative to start_frame.
     """
-    capture = cv2.VideoCapture(str(video_path))
-    if not capture.isOpened():
-        raise FileNotFoundError(f"Could not open video: {video_path}")
+    people_detector = people_detector or PeopleDetector()
 
-    if start_frame:
-        capture.set(cv2.CAP_PROP_POS_FRAMES, int(start_frame))
-
-    extractor = PoseExtractor(mode="video", num_poses=num_poses)
-    fps = capture.get(cv2.CAP_PROP_FPS) or 30
-    poses_per_frame = []
+    people_per_frame = []
     ball_candidates = []
+    fps = 30.0
 
-    try:
-        while True:
-            if max_frames is not None and len(poses_per_frame) >= max_frames:
-                break
+    def first_pass(frame, frame_index):
+        people_per_frame.append(people_detector.detect(frame, frame_index))
+        ball_candidates.append(
+            ball_detector.detect_candidates(frame, frame_index)
+            if ball_detector is not None
+            else []
+        )
 
-            success, frame = capture.read()
-            if not success:
-                break
+    fps = _walk(video_path, rotate, start_frame, max_frames, first_pass)
+    frame_count = len(people_per_frame)
 
-            if rotate is not None:
-                frame = cv2.rotate(frame, rotate)
-
-            frame_index = len(poses_per_frame)
-            ball_candidates.append(
-                ball_detector.detect_candidates(frame, frame_index)
-                if ball_detector is not None
-                else []
-            )
-            # Timestamps come from the frame index, not CAP_PROP_POS_MSEC:
-            # that property is read after capture.read() so it reports the
-            # *next* frame, and some codecs return 0 forever, which breaks
-            # MediaPipe's strictly-increasing timestamp requirement.
-            result = extractor.process_frame(frame, int(frame_index * 1000 / fps))
-            poses_per_frame.append(extractor.get_all_landmarks(result))
-    finally:
-        capture.release()
-
-    # Only the passer is scored. Without this, a bystander in the background
-    # can become pose[0] for part of the clip and silently corrupt the rep.
-    frame_count = len(poses_per_frame)
-    passer, target = assign_roles(track_people(poses_per_frame))
-    frames_landmarks = (
-        passer.aligned(frame_count) if passer is not None else [None] * frame_count
+    passer, target = assign_roles(tracks_from_detector(people_per_frame))
+    frames_landmarks = _measure_passer(
+        video_path, rotate, start_frame, frame_count, passer,
     )
 
     # Only the tracked path reaches the scorer. Raw top-1 detections are
@@ -125,6 +103,60 @@ def analyze_video(
         passer,
         target,
     )
+
+
+def _walk(video_path, rotate, start_frame, max_frames, handle):
+    """Run handle(frame, index) over the chosen span, returning the clip's fps."""
+    capture = cv2.VideoCapture(str(video_path))
+    if not capture.isOpened():
+        raise FileNotFoundError(f"Could not open video: {video_path}")
+    if start_frame:
+        capture.set(cv2.CAP_PROP_POS_FRAMES, int(start_frame))
+
+    fps = capture.get(cv2.CAP_PROP_FPS) or 30
+    index = 0
+    try:
+        while max_frames is None or index < max_frames:
+            success, frame = capture.read()
+            if not success:
+                break
+            if rotate is not None:
+                frame = cv2.rotate(frame, rotate)
+            handle(frame, index)
+            index += 1
+    finally:
+        capture.release()
+    return fps
+
+
+def _measure_passer(video_path, rotate, start_frame, frame_count, passer):
+    """Second pass: read the passer's pose from a crop around them."""
+    frames_landmarks = [None] * frame_count
+    if passer is None:
+        return frames_landmarks
+
+    extractor = PoseExtractor(mode="video", num_poses=SINGLE_POSE)
+
+    def measure(frame, index):
+        box = passer.box(index)
+        if box is None:
+            return
+        crop, placement = square_crop(frame, box)
+        if crop.size == 0:
+            return
+        # Timestamps come from the frame index, not CAP_PROP_POS_MSEC: that
+        # property is read after the decode so it reports the next frame, and
+        # some codecs return 0 forever, which breaks MediaPipe's requirement
+        # that timestamps strictly increase.
+        result = extractor.process_frame(crop, int(index * 1000 / 30))
+        landmarks = extractor.get_landmarks(result) if result.pose_landmarks else None
+        if landmarks:
+            frames_landmarks[index] = to_frame_coordinates(
+                landmarks, placement, frame.shape,
+            )
+
+    _walk(video_path, rotate, start_frame, frame_count, measure)
+    return frames_landmarks
 
 
 def rep_for_frame(report, frame_index):

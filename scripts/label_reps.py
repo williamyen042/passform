@@ -44,7 +44,6 @@ def parse_args():
     parser.add_argument("--rotate", default="none", choices=sorted(ROTATIONS))
     parser.add_argument("--start-frame", default=0, type=int)
     parser.add_argument("--max-frames", default=None, type=int)
-    parser.add_argument("--num-poses", default=1, type=int)
     parser.add_argument("--repropose", action="store_true",
                         help="Ignore the cached proposals and run the pipeline again.")
     return parser.parse_args()
@@ -59,7 +58,6 @@ def proposals_for(args):
     print(f"Running the pipeline over {args.video} to propose reps...")
     analysis = analyze_video(
         args.video,
-        num_poses=args.num_poses,
         rotate=ROTATIONS[args.rotate],
         start_frame=args.start_frame,
         max_frames=args.max_frames,

@@ -1,6 +1,7 @@
 #setup for mediapipe
 import mediapipe as mp
 import cv2
+import numpy as np
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
 
@@ -80,3 +81,44 @@ class PoseExtractor:
 
 
     
+
+
+#crop a square around a person and read their pose at full detail
+def square_crop(frame, box, padding=0.18):
+    """Square region around a normalized box, so aspect ratio is preserved.
+
+    Angles are the whole point here, and a stretched crop would bend every one
+    of them. Square in, square out.
+    """
+    height, width = frame.shape[:2]
+    x1, y1, x2, y2 = box
+    centre_x = (x1 + x2) / 2.0 * width
+    centre_y = (y1 + y2) / 2.0 * height
+    side = max((x2 - x1) * width, (y2 - y1) * height) * (1.0 + padding)
+    side = max(side, 32.0)
+
+    side = int(round(side))
+    left = int(round(centre_x - side / 2))
+    top = int(round(centre_y - side / 2))
+
+    # Build the square directly and copy in whatever part of it is on screen.
+    # Padding the whole frame first, as this did originally, allocated an
+    # image larger than the source on every single frame.
+    crop = np.zeros((side, side, 3), dtype=frame.dtype)
+    x1 = max(0, left)
+    y1 = max(0, top)
+    x2 = min(width, left + side)
+    y2 = min(height, top + side)
+    if x2 > x1 and y2 > y1:
+        crop[y1 - top:y2 - top, x1 - left:x2 - left] = frame[y1:y2, x1:x2]
+    return crop, (left, top, side)
+
+
+def to_frame_coordinates(landmarks, placement, frame_shape):
+    """Map landmarks measured inside a crop back onto the whole frame."""
+    left, top, side = placement
+    height, width = frame_shape[:2]
+    for landmark in landmarks:
+        landmark.x = (left + landmark.x * side) / width
+        landmark.y = (top + landmark.y * side) / height
+    return landmarks
