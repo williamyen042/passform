@@ -80,7 +80,7 @@ def analyze_video(
 
     passer, target = assign_roles(tracks_from_detector(people_per_frame))
     frames_landmarks = _measure_passer(
-        video_path, rotate, start_frame, frame_count, passer,
+        video_path, rotate, start_frame, frame_count, passer, fps,
     )
 
     # Only the tracked path reaches the scorer. Raw top-1 detections are
@@ -129,7 +129,7 @@ def _walk(video_path, rotate, start_frame, max_frames, handle):
     return fps
 
 
-def _measure_passer(video_path, rotate, start_frame, frame_count, passer):
+def _measure_passer(video_path, rotate, start_frame, frame_count, passer, fps):
     """Second pass: read the passer's pose from a crop around them."""
     frames_landmarks = [None] * frame_count
     if passer is None:
@@ -148,7 +148,7 @@ def _measure_passer(video_path, rotate, start_frame, frame_count, passer):
         # property is read after the decode so it reports the next frame, and
         # some codecs return 0 forever, which breaks MediaPipe's requirement
         # that timestamps strictly increase.
-        result = extractor.process_frame(crop, int(index * 1000 / 30))
+        result = extractor.process_frame(crop, int(index * 1000 / max(fps, 1)))
         landmarks = extractor.get_landmarks(result) if result.pose_landmarks else None
         if landmarks:
             frames_landmarks[index] = to_frame_coordinates(
