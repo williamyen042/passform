@@ -15,8 +15,16 @@ fixes live on each one.
 | [8](https://github.com/williamyen042/passform/issues/8) | Ball and person trackers associate greedily | `tech-debt` |
 | [9](https://github.com/williamyen042/passform/issues/9) | Dependencies are unpinned, and the venv breaks if the project moves | `infra` |
 | [10](https://github.com/williamyen042/passform/issues/10) | Loose ends: phantom test split, dead utils placeholders | `tech-debt` |
+| [11](https://github.com/williamyen042/passform/issues/11) | Two scoring bands are provably wrong without needing labelled data | `correctness` |
 
 **#1 gates the most.** Nothing that depends on ball flight — trajectory
 metrics, measured contact on every clip, the outcome label — is reliable until
 the detector is retrained on our own footage. #2 and #3 are what the labelled
 dataset exists to close.
+
+**#3 is worse than it reads.** Measured across the five sample clips, one
+scoring term never fires at all and four of the fourteen are pinned at an
+extreme for almost every rep, so the score is driven by fewer inputs than the
+design implies. Re-centring a single implausible band reverses which of two
+clips the tool calls better. #11 splits out the two bands that can be shown
+wrong without any labelled data.
