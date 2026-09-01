@@ -68,10 +68,11 @@ rather than a clean side or front view. This is workable, but it has one hard re
 - Target **at least 50, ideally 100+**. Below ~50 the accuracy number is too noisy to
   trust; at 100+ it starts to mean something. If you can only do 40, that's fine, but
   report it honestly and don't oversell it.
-- **Balance the classes.** Aim for a rough 50/50 split of good vs. bad-form reps. A set
+- **Balance the classes.** Aim for a spread across all four levels. A set
   that is 90% threes cannot demonstrate the model catches a bad pass, which is the whole
   point. Deliberately record reps with visible faults: bent elbows, dropped/uneven
-  platform, no knee bend, swinging arms.
+  platform, no knee bend, swinging arms. Watch that 0s and 1s do not end up so
+  rare they cannot be fitted; if they do, collapse to 3-vs-rest.
 - Sources: record yourself/teammates, or pull rep clips from existing volleyball footage.
   Keep the **camera angle locked** (see Phase 0) — every rep from the same diagonal. You
   can vary lighting and clothing a little so the model isn't keying on those, but the
@@ -186,7 +187,7 @@ Metrics to record (don't report only accuracy):
 - Write the bullet from real numbers:
   > Trained a form classifier (logistic regression / random forest) on N hand-labeled
   > reps, achieving X% ± Z% 5-fold-CV accuracy from MediaPipe joint-angle features,
-  > improving bad-form recall by Y points over a rule-based baseline.
+  > improving recall on the low classes by Y points over a rule-based baseline.
 - Report N honestly. If N=45, say 45. The caveat ("small labeled set, cross-validated")
   makes you *more* credible, not less.
 
