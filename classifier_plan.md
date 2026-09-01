@@ -1,8 +1,8 @@
 # Volleyball Form Classifier — Dataset + Model Plan
 
 Goal: upgrade the rule-based form scorer into a **validated, learned classifier** that
-predicts good/bad form from joint-angle features, producing a defensible accuracy number
-for the resume. The model is the easy part. The dataset is the part that decides whether
+predicts pass quality on the 0-3 scale from joint-angle features, producing a defensible
+accuracy number for the resume. The model is the easy part. The dataset is the part that decides whether
 this is worth doing — so it comes first and gets the most attention.
 
 The honest target bullet this produces:
@@ -16,8 +16,20 @@ Every number in that bullet (N, X, Y) comes out of the steps below. None are inv
 
 ## Phase 0 — Decisions to make before you touch code
 
-**Label format:** binary (good form / bad form). Start here. Don't do 1–5 scoring yet —
-it's harder to label consistently and you don't have the data volume to justify it.
+**Label format:** the 0–3 passing scale coaches already use. 3 is a perfect
+receive where the setter can run every option without moving much; 2 is out of
+system, the setter has to move and the middle is probably off; 1 is a shank or
+overpass, or a pass the setter has to run down; 0 is an ace.
+
+Chosen over a binary because it is the scale coaches already think in, so it is
+*easier* to label consistently rather than harder, and because four levels can
+be collapsed to a binary later if the per-class counts turn out too thin —
+whereas a binary could never be expanded without relabelling everything.
+
+The **zone the passer received in** is recorded alongside it, since a 2 from
+zone 5 and a 2 from zone 1 are not the same rep.
+
+See `LABELING.md` for the rubric and the edge cases.
 
 **Unit of labeling:** one *rep* = one labeled example. A "rep" is a single completed
 movement (one bump/pass). Decide the rep boundary now (e.g., from arm-raise to contact)
@@ -57,7 +69,7 @@ rather than a clean side or front view. This is workable, but it has one hard re
   trust; at 100+ it starts to mean something. If you can only do 40, that's fine, but
   report it honestly and don't oversell it.
 - **Balance the classes.** Aim for a rough 50/50 split of good vs. bad-form reps. A set
-  that's 90% good form can't demonstrate the model catches bad form — which is the whole
+  that is 90% threes cannot demonstrate the model catches a bad pass, which is the whole
   point. Deliberately record reps with visible faults: bent elbows, dropped/uneven
   platform, no knee bend, swinging arms.
 - Sources: record yourself/teammates, or pull rep clips from existing volleyball footage.
@@ -67,13 +79,13 @@ rather than a clean side or front view. This is workable, but it has one hard re
   footage breaks single-person pose tracking — don't use it).
 
 ### 1.2 Label them
-- For each rep, assign `good` (1) or `bad` (0) based on watching it.
+- For each rep, assign 3, 2, 1 or 0 based on watching it, plus the passer's zone.
 - Ideally get a second person who knows volleyball to label a subset (~15–20 reps)
   independently. If your labels and theirs agree ~85%+, your ground truth is solid and you
   can say so ("inter-rater agreement of Z% on a 20-rep subset") — that's a credibility
   signal most student projects never bother with. If you can't get a second labeler,
   that's OK, just don't claim it.
-- Store labels in a simple CSV: `rep_id, video_path, label, labeler, notes`.
+- Store labels in a simple CSV: `rep_id, video, contact_frame, label, zone, labeler, notes`.
 
 ### 1.3 Extract features (this is where your existing pipeline plugs in)
 You already extract 33 MediaPipe keypoints at 30fps. Turn each rep into a fixed-length
@@ -151,9 +163,11 @@ depending on which reps land in test). Use **5-fold stratified cross-validation*
 
 Metrics to record (don't report only accuracy):
 - **Accuracy** — overall.
-- **Precision and recall for the "bad form" class** — because catching bad form is the
-  useful job. A model that's 90% accurate but never catches bad reps is useless, and these
-  metrics expose that.
+- **Precision and recall on the low classes (0 and 1)** — because catching a bad
+  pass is the useful job. A model that is 90% accurate but never catches one is
+  useless, and these metrics expose that. With an ordinal target, also report
+  mean absolute error: predicting 2 when the truth is 3 is a much smaller miss
+  than predicting 2 when the truth is 0, and plain accuracy hides that.
 - **Confusion matrix** — for your own understanding of where it fails.
 
 ### 3.3 The contamination rule (same as the threshold-tuning trap)
@@ -166,7 +180,7 @@ Metrics to record (don't report only accuracy):
 ## Phase 4 — Interpret and report
 
 - Pull the **feature importances** (logistic regression coefficients or tree importances):
-  which angles most determine good vs. bad form? This is a genuinely interesting result —
+  which angles most determine pass quality? This is a genuinely interesting result —
   e.g., "platform stability was the strongest predictor" — and it's the kind of insight a
   rule-based scorer can't give you.
 - Write the bullet from real numbers:
@@ -180,7 +194,7 @@ Metrics to record (don't report only accuracy):
 
 ## What to build, in order (checklist)
 
-1. [ ] Decide rep boundary + binary label definition (Phase 0)
+1. [x] Decide rep boundary + label definition — 0-3 scale, see `LABELING.md`
 2. [ ] Collect 50–100+ reps, deliberately balanced good/bad (1.1)
 3. [ ] Label them blind to the scorer; second labeler on a subset if possible (1.2)
 4. [ ] Extend your MediaPipe pipeline to emit a per-rep feature vector → `features.csv` (1.3)
@@ -212,5 +226,6 @@ Metrics to record (don't report only accuracy):
 
 - Model the angle *trajectory over time* (features from the angle-vs-time curve, or a small
   1D-CNN/LSTM) to capture motion quality, not just a snapshot. Needs more data; real step up.
-- Per-fault classification (which specific fault occurred) instead of binary — useful, needs
-  more labels per class.
+- Per-fault classification (which specific fault occurred) rather than an overall
+  score — useful, needs more labels per class. The `notes` column collects these
+  as you go, so the data is already accumulating.

@@ -19,17 +19,25 @@ to reproduce your own eye — and the scorer already encodes that. Labelling
 where the ball *arrived* lets the model discover which form features actually
 predict a good pass, which is a finding rather than a restatement.
 
-So: a pass with ugly form that lands perfectly is **good**. A textbook platform
-that sends the ball to the wrong place is **bad**. Judge the ball.
+So: a pass with ugly form that lands perfectly is a **3**. A textbook platform
+that sends the ball to the wrong place is not. Judge the ball.
 
-## The rule
+## The scale
 
-> **good** — the setter could play it without moving more than one step.
-> **bad** — anything else.
+The one coaches already use. Judge what the pass left the setter with.
 
-That is the coaching definition, and it stays consistent whether the setter is
-actively playing the ball or standing still. When the setter is passive, judge
-where the ball arrived relative to where they are standing.
+| | | |
+|---|---|---|
+| **3** | perfect | Setter can run every option comfortably. Barely moves. |
+| **2** | out of system | Setter has to move to set it. The middle is probably off. |
+| **1** | shank or overpass | Setter has to run to reach it, or it goes over. |
+| **0** | ace | Nobody touches it, or it drops. |
+
+The line between 3 and 2 is **whether the middle is still available**. The line
+between 2 and 1 is **moving versus running**.
+
+When the setter is passive and does not react, judge where the ball arrived
+relative to where they are standing — the scale does not change.
 
 ## Per rep
 
@@ -39,12 +47,14 @@ The tool proposes a contact frame; you are correcting it, not finding it.
    right frame is the one where the ball is on the platform — one frame later
    it is already leaving. Press `space` to move it.
 2. **Watch the ball, not the athlete.**
-3. **Press `g`, `b`, or `x`.**
+3. **Press `3`, `2`, `1`, `0`, or `x`.**
+4. **Then press the zone the passer received in**, `1`–`6`, or `space` to leave
+   it blank. Asked as a second keypress because the digits already mean pass
+   quality.
 
 | key | meaning |
 |-----|---------|
-| `g` | good — setter plays it without moving more than a step |
-| `b` | bad — anything else |
+| `3` `2` `1` `0` | pass quality, per the scale above |
 | `x` | exclude — see below |
 | `n` | skip, decide later |
 | `q` | stop; already-labelled reps are skipped on the next run |
@@ -65,11 +75,12 @@ Excluding is not failure — it keeps noise out of the set. Written to the CSV a
 
 | situation | call |
 |---|---|
-| Ugly form, ball lands perfectly | **good** — judge the ball |
-| Perfect platform, ball goes wide | **bad** — judge the ball |
-| Setter reaches a bad pass anyway | **bad** — judge where it went, not the recovery |
-| Right place but far too flat or fast | **bad** — the setter cannot use it |
-| Right place, floaty and slow | **good** — it is playable |
+| Ugly form, ball lands perfectly | **3** — judge the ball |
+| Perfect platform, ball goes wide | score where it went, not how it looked |
+| Setter runs it down and sets it anyway | **1** — judge the pass, not the recovery |
+| Right height and place, but middle is off | **2** — that is the 3/2 line |
+| Right place, floaty and slow | **3** — it is playable |
+| Overpass that the other side could attack | **1** |
 | Setter was out of position to begin with | judge against where they *should* be |
 | Feed was terrible | `x` |
 
@@ -96,8 +107,10 @@ answers. It is that you apply the same one every time.
 `data/labels.csv`, one row per rep:
 
 ```
-rep_id, video, contact_frame, label, labeler, notes
+rep_id, video, contact_frame, label, zone, labeler, notes
 ```
+
+`label` is `3`, `2`, `1`, `0` or `excluded`. `zone` is 1–6 or blank.
 
 Rows append and already-labelled reps are skipped, so a session can be
 interrupted safely.
@@ -109,3 +122,7 @@ re-attach your labels to different reps.
 Use `notes` freely — a fault you noticed, a reason for excluding. It costs
 nothing now and it is the entire per-fault classification stretch goal,
 pre-collected.
+
+An ordinal label also leaves the options open. Four levels can always be
+collapsed to a binary later if the counts turn out too thin to fit on; a binary
+recorded now could never be expanded without relabelling everything.

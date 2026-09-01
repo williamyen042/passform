@@ -27,10 +27,20 @@ ROTATIONS = {
 }
 WINDOW_FRAMES = 90
 DISPLAY_WIDTH = 960
-FIELDS = ("rep_id", "video", "contact_frame", "label", "labeler", "notes")
+FIELDS = ("rep_id", "video", "contact_frame", "label", "zone", "labeler", "notes")
+# The scale coaches already use. Ordinal rather than binary, which carries more
+# information per rep - and at 100 reps that matters.
+LABELS = {
+    ord("3"): "3",   # setter can set every option without moving much
+    ord("2"): "2",   # setter has to move, middle probably off, out of system
+    ord("1"): "1",   # shank or overpass, or the setter has to run to it
+    ord("0"): "0",   # ace or no touch
+}
+ZONES = {ord(str(zone)): str(zone) for zone in range(1, 7)}
 HELP = [
     "left/right +-1    a/d +-10    space set contact here",
-    "g good    b bad    x exclude    n skip    q quit",
+    "3 perfect   2 out of system   1 shank/overpass   0 ace",
+    "x exclude    n skip    q quit",
 ]
 
 
@@ -87,13 +97,13 @@ def load_window(capture, centre, rotation):
     return frames
 
 
-def draw(frame, index, contact, proposed, position, total):
+def draw(frame, index, contact, proposed, position, total, prompt=None):
     canvas = frame.copy()
     banner = [
         f"rep {position}/{total}   frame {index}"
         f"   contact {contact} ({index - contact:+d})"
         f"   proposed {proposed}",
-    ] + HELP
+    ] + (prompt if prompt else HELP)
     for row, text in enumerate(banner):
         y = 26 + row * 26
         cv2.putText(canvas, text, (12, y), 0, 0.6, (0, 0, 0), 4)
@@ -101,6 +111,29 @@ def draw(frame, index, contact, proposed, position, total):
     marker = (60, 220, 60) if index == contact else (200, 200, 200)
     cv2.circle(canvas, (canvas.shape[1] - 30, 30), 12, marker, -1)
     return canvas
+
+
+def ask_zone(frame, index, contact, proposed, position, total):
+    """Second keypress: which zone the passer received in.
+
+    Asked separately because 1, 2 and 3 already mean pass quality. Space skips
+    it, so a drill where the zone never changes costs one extra key per rep and
+    can be left blank without holding up the labelling.
+    """
+    prompt = [
+        "zone the PASSER received in:  1-6",
+        "space to leave blank",
+    ]
+    while True:
+        cv2.imshow("label reps", draw(
+            frame, index, contact, proposed, position, total, prompt))
+        key = cv2.waitKey(0) & 0xFF
+        if key in ZONES:
+            return ZONES[key]
+        if key in (ord(" "), 13, 10):
+            return ""
+        if key == ord("q"):
+            raise KeyboardInterrupt
 
 
 def already_labelled(path):
@@ -166,20 +199,19 @@ def label(args):
                     index += 10
                 elif key == ord(" "):
                     contact = index
-                elif key in (ord("g"), ord("b"), ord("x")):
+                elif key in LABELS or key == ord("x"):
                     # Excluded reps are written too, not silently dropped.
                     # Otherwise there is no record of how many were thrown out,
                     # and a rerun would offer them again.
-                    label = {
-                        ord("g"): "good",
-                        ord("b"): "bad",
-                        ord("x"): "excluded",
-                    }[key]
+                    label = LABELS.get(key, "excluded")
+                    zone = "" if label == "excluded" else ask_zone(
+                        frame, index, contact, proposed, position, len(contacts))
                     append_row(args.labels, {
                         "rep_id": rep_id,
                         "video": str(args.video),
                         "contact_frame": contact,
                         "label": label,
+                        "zone": zone,
                         "labeler": args.labeler,
                         "notes": "",
                     })
