@@ -30,7 +30,7 @@ DISPLAY_WIDTH = 960
 FIELDS = ("rep_id", "video", "contact_frame", "label", "labeler", "notes")
 HELP = [
     "left/right +-1    a/d +-10    space set contact here",
-    "g good    b bad    x not a pass    n skip    q quit",
+    "g good    b bad    x exclude    n skip    q quit",
 ]
 
 
@@ -167,16 +167,23 @@ def label(args):
                 elif key == ord(" "):
                     contact = index
                 elif key in (ord("g"), ord("b"), ord("x")):
-                    if key != ord("x"):
-                        append_row(args.labels, {
-                            "rep_id": rep_id,
-                            "video": str(args.video),
-                            "contact_frame": contact,
-                            "label": "good" if key == ord("g") else "bad",
-                            "labeler": args.labeler,
-                            "notes": "",
-                        })
-                        written += 1
+                    # Excluded reps are written too, not silently dropped.
+                    # Otherwise there is no record of how many were thrown out,
+                    # and a rerun would offer them again.
+                    label = {
+                        ord("g"): "good",
+                        ord("b"): "bad",
+                        ord("x"): "excluded",
+                    }[key]
+                    append_row(args.labels, {
+                        "rep_id": rep_id,
+                        "video": str(args.video),
+                        "contact_frame": contact,
+                        "label": label,
+                        "labeler": args.labeler,
+                        "notes": "",
+                    })
+                    written += 1
                     break
                 elif key == ord("n"):
                     break
