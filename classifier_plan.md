@@ -195,7 +195,7 @@ Metrics to record (don't report only accuracy):
 ## What to build, in order (checklist)
 
 1. [x] Decide rep boundary + label definition — 0-3 scale, see `LABELING.md`
-2. [ ] Collect 50–100+ reps, deliberately balanced good/bad (1.1)
+2. [ ] Collect 50–100+ reps, deliberately spread across the four levels (1.1)
 3. [ ] Label them blind to the scorer; second labeler on a subset if possible (1.2)
 4. [ ] Extend your MediaPipe pipeline to emit a per-rep feature vector → `features.csv` (1.3)
 5. [ ] Run the existing rule-based scorer on the set, record baseline accuracy (Phase 2)
