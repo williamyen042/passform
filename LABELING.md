@@ -4,9 +4,33 @@ Fix the rule before labelling anything. In three weeks you will not remember
 what you meant by "in the setter's area", and labels that drift halfway through
 a session are worse than fewer labels.
 
+There are two tools, and they build two different datasets from the same
+scale.
+
+**Features from a contact frame** - correct the contact frame the pipeline
+proposed, label the pass. Writes `data/labels.csv`.
+
 ```bash
 .venv/bin/python scripts/label_reps.py --video data/clip.mp4 --labeler will
 ```
+
+**Clips for a video model** - mark the rep boundaries yourself off raw
+footage; each rep is cut to its own file. Writes `volleyball_dataset/`.
+
+```bash
+.venv/bin/python scripts/annotate.py --video data/practice_01.mp4
+```
+
+Opens a browser. The loop is `S` at the start of the rep, watch the pass, then
+`0`-`3` for quality, then `1`-`6` for the zone the passer received in - or
+`↵` to repeat the last zone, which is most reps in a drill. Two keys each,
+and the video never stops. `X` discards a rep in progress - a mishit, a
+serve, someone walking through - and `R` does the same, `⌫` withdraws the
+one you just saved, and clicking a saved rep lets you re-label it or nudge
+its timestamps and re-cut the clip. Nothing is deleted: a withdrawn rep stays
+in `metadata.json` and only leaves `labels.csv`.
+
+The judgement below is the same for both. Read it before either.
 
 ---
 
