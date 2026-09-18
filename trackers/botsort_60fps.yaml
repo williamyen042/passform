@@ -1,0 +1,25 @@
+# BoT-SORT for our footage, which is 60fps.
+#
+# Ultralytics' defaults are written for ~30fps, so track_buffer: 30 keeps a
+# lost person alive for half a second here rather than the intended one. In a
+# drill where players queue up and walk behind each other, half a second of
+# occlusion is normal, and every one of them was minting a new id: 11 ids for
+# six people in a six second clip, with only three surviving end to end.
+#
+# with_reid lets a person who reappears be matched on how they look, not only
+# on where they were. That is the case this footage is full of.
+
+tracker_type: botsort
+track_high_thresh: 0.25
+track_low_thresh: 0.1
+new_track_thresh: 0.25
+track_buffer: 120        # 2 seconds at 60fps, the same span the default meant at 30
+match_thresh: 0.8
+fuse_score: True
+
+gmc_method: sparseOptFlow
+
+proximity_thresh: 0.5
+appearance_thresh: 0.8
+with_reid: True
+model: auto
