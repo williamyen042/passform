@@ -41,6 +41,11 @@ def parse_args():
     return parser.parse_args()
 
 
+def rep_center(analysis):
+    reps = analysis.report.get("reps", [])
+    return reps[0]["frame_center"] if reps else 0
+
+
 def chosen_rep(reps, frame_count):
     """One clip is one rep, but the detector sometimes finds a second contact.
 
@@ -71,6 +76,17 @@ def row_for(rep_row, clip, tracker=None):
         "filename": rep_row["filename"],
         "duration": float(rep_row["duration"]),
         "candidates": len(analysis.report.get("reps", [])),
+        # The rubric's own quantity: how far the setter had to move.
+        "target_travel": analysis.target_travel,
+        # Whether the ball reached anybody at all, kept as its own column.
+        # target_travel is undefined exactly where the label is most extreme -
+        # "nobody touches it, or it drops" is the definition of a 0 - and
+        # imputing a median over that would erase the most informative thing
+        # about the rep.
+        "pass_reached_someone": int(analysis.target_travel is not None),
+        "pass_flight": (None if analysis.arrival_frame is None else
+                        round((analysis.arrival_frame - rep_center(analysis))
+                              / max(analysis.fps, 1), 3)),
         "contact_source": None,
         "contact_frac": None,
         "baseline_hint": None,

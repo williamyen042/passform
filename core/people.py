@@ -263,6 +263,17 @@ def _nearest_to(tracks, frame_index, point):
     return best
 
 
+def arrival_from_ball(hits, contact_frame):
+    """When the ball was next played, straight off the touch list.
+
+    The pose version below has to watch for hands going up, which needs the
+    target to be visible and to actually reach. The ball changing direction a
+    second time says the same thing and says it for anyone.
+    """
+    later = sorted(index for index, _, _, _ in hits if index > contact_frame)
+    return later[0] if later else None
+
+
 def arrival_frame(target, contact_frame, fps):
     """First frame after contact where the target reaches up to play the ball.
 
@@ -270,9 +281,9 @@ def arrival_frame(target, contact_frame, fps):
     above the shoulders marks the arrival. That is the same geometry that tells
     a pass from an overhead action for the passer, read the other way round.
 
-    ponytail: pose only, because it works with no ball track at all. Once the
-    detector can see the ball, the arrival is just where the outgoing arc
-    reaches the target and this becomes the fallback.
+    ponytail: pose only, and now the fallback. arrival_from_ball above is the
+    version that uses the ball, which is what the ponytail note here asked for
+    once the detector could see it.
     """
     if target is None:
         return None

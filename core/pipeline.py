@@ -10,13 +10,20 @@ from typing import List, NamedTuple, Optional
 import cv2
 
 from core.ball_tracker import track_ball, track_detections
-from core.people import assign_roles, roles_from_ball, tracks_from_detector
+from core.people import (arrival_from_ball, assign_roles, roles_from_ball,
+                         target_displacement, tracks_from_detector)
 from core.people_detector import PeopleDetector
+from core.vball_detector import touches
 from core.pose_extractor import PoseExtractor, square_crop, to_frame_coordinates
 from core.scorer import analyze_frames
 
 
 class VideoAnalysis(NamedTuple):
+    # How far the setter had to travel to play the pass, in their own torso
+    # lengths, and when they played it. LABELING.md defines the whole 0-3 scale
+    # in these terms - "barely moves", "has to move", "has to run" - so this is
+    # the rubric's own quantity rather than a proxy for it. None when the ball
+    # never reaches anyone, which is itself what a 0 looks like.
     report: dict
     fps: float
     # Per-frame and index-aligned, so frames_landmarks[i] and
@@ -31,6 +38,8 @@ class VideoAnalysis(NamedTuple):
     # only one person is in frame.
     passer: Optional[object] = None
     target: Optional[object] = None
+    target_travel: Optional[float] = None
+    arrival_frame: Optional[int] = None
 
 
 # Every pose the finer pass reads is a crop of one person, so MediaPipe is
@@ -97,12 +106,18 @@ def analyze_video(
     # witness that cannot be confused by someone standing with their hands
     # together. Platform shape stays as the fallback.
     contacts = None
+    travel = arrival = None
     if ball_detections is not None:
         by_ball = roles_from_ball(
             tracks, ball_detections, fps, *_frame_size(video_path, rotate))
         if by_ball is not None:
             passer, target, contact_frame = by_ball
             # The same touch that chose the passer is the one that gets scored.
+            arrival = arrival_from_ball(
+                touches(ball_detections, fps, *_frame_size(video_path, rotate)),
+                contact_frame)
+            if arrival is not None:
+                travel = target_displacement(target, contact_frame, arrival)
             contacts = [{
                 "frame_index": contact_frame,
                 "contact_source": "ball",
@@ -137,6 +152,8 @@ def analyze_video(
         ball_track,
         passer,
         target,
+        travel,
+        arrival,
     )
 
 
