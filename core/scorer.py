@@ -805,6 +805,43 @@ def _contact_value(contact, key, default=None):
     return contact.get(key, default)
 
 
+def contact_geometry(landmarks, ball_center):
+    """Where the ball met the passer, relative to the passer.
+
+    A pass needs room. When the ball arrives into the chest rather than out in
+    front, there is no angle to play it from however good the platform is, and
+    the result is weak regardless of form - which is a thing the pose features
+    cannot see, because the body can look identical either way.
+
+    reach   distance from the torso centre, in torso lengths. Small is jammed.
+    height  where it met them, in torso lengths above the hips. Negative is
+            below the waist, around 1 is chest high.
+    ahead   how far in front of the torso, signed toward the platform, so a
+            ball met behind the body reads negative.
+    """
+    if not _has_full_pose(landmarks) or ball_center is None:
+        return {"contact_reach": None, "contact_height": None, "contact_ahead": None}
+    scale = body_scale(landmarks)
+    if math.isnan(scale):
+        return {"contact_reach": None, "contact_height": None, "contact_ahead": None}
+
+    shoulder_mid = midpoint(
+        landmarks[LEFT_SIDE["shoulder"]], landmarks[RIGHT_SIDE["shoulder"]])
+    hip_mid = midpoint(landmarks[LEFT_SIDE["hip"]], landmarks[RIGHT_SIDE["hip"]])
+    torso_centre = (shoulder_mid + hip_mid) / 2.0
+    ball = np.array(ball_center, dtype=float)
+
+    facing = _platform_point(landmarks) - torso_centre
+    length = float(np.linalg.norm(facing))
+    ahead = (float(np.dot(ball - torso_centre, facing / length)) / scale
+             if length > 1e-6 else None)
+    return {
+        "contact_reach": round(float(np.linalg.norm(ball - torso_centre)) / scale, 3),
+        "contact_height": round(float(hip_mid[1] - ball[1]) / scale, 3),
+        "contact_ahead": round(ahead, 3) if ahead is not None else None,
+    }
+
+
 def body_scale(landmarks):
     """Torso length: the one length that holds up when the passer turns.
 

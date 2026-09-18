@@ -211,7 +211,11 @@ def roles_from_ball(tracks, ball_detections, fps, frame_width, frame_height):
     # wrong. Nothing in the current footage does that, and the tell would be a
     # touch that accelerates the ball rather than absorbing it.
     contact_frame = min(hits, key=lambda hit: hit[0])[0]
-    ball = ball_detections[contact_frame]
+    # The contact frame now sits inside the gap the ball leaves while it is
+    # against the platform, so there is usually no detection on it. Take the
+    # nearest sighting either side for the proximity test - the ball is at the
+    # passer for all of them, which is the entire point of the gap.
+    ball = _nearest_sighting(ball_detections, contact_frame)
     if ball is None:
         return None
 
@@ -226,7 +230,7 @@ def roles_from_ball(tracks, ball_detections, fps, frame_width, frame_height):
     later = sorted(index for index, _, _, _ in hits if index > contact_frame)
     if later:
         arrival = later[0]
-        arriving_ball = ball_detections[arrival]
+        arriving_ball = _nearest_sighting(ball_detections, arrival)
         if arriving_ball is not None:
             target = _nearest_to(tracks, arrival, arriving_ball.center)
     return passer, target, contact_frame
@@ -235,6 +239,14 @@ def roles_from_ball(tracks, ball_detections, fps, frame_width, frame_height):
 # Beyond this the ball is not on anybody, in normalized frame units. A touch
 # with nobody near it is the floor, not a player.
 MAX_BALL_GAP = 0.06
+
+
+def _nearest_sighting(ball_detections, frame_index, reach=8):
+    for step in range(reach):
+        for index in (frame_index - step, frame_index + step):
+            if 0 <= index < len(ball_detections) and ball_detections[index] is not None:
+                return ball_detections[index]
+    return None
 
 
 def _nearest_to(tracks, frame_index, point):

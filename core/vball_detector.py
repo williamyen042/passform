@@ -249,7 +249,28 @@ def touches(track, fps, frame_width, frame_height, min_turn=40.0, window=4,
     for entry in sorted(found, key=lambda item: -item[1]):
         if all(abs(entry[0] - other[0]) >= separation for other in kept):
             kept.append(entry)
-    return kept
+    return [(_centre_of_gap(track, index), turn, before, after)
+            for index, turn, before, after in kept]
+
+
+def _centre_of_gap(track, index):
+    """Put the contact inside the gap the ball leaves, not at the edge of it.
+
+    While the ball is against a platform it is half hidden by hands and
+    forearms and the detector loses it, so the last frame it was seen is
+    always a little before the touch. On rep_0014 the ball was tracked
+    descending to frame 131, disappeared for four frames, and came back rising
+    at 136 - the contact is in there, not at 131, and 131 is what was being
+    handed to the pose measurement.
+    """
+    following = next(
+        (later for later in range(index + 1, min(index + 12, len(track)))
+         if track[later] is not None),
+        None,
+    )
+    if following is None or following - index <= 1:
+        return index
+    return (index + following) // 2
 
 
 def pass_features(track, contact_frame, fps, frame_width, frame_height):

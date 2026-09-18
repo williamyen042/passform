@@ -19,6 +19,7 @@ import time
 from pathlib import Path
 
 from core.pipeline import analyze_video
+from core.scorer import contact_geometry
 import cv2
 
 from core.vball_detector import VballNetDetector, pass_features
@@ -94,6 +95,16 @@ def row_for(rep_row, clip, tracker=None):
              round((d.bbox[2] - d.bbox[0]) / 2, 5)]
             for index, d in enumerate(track) if d is not None
         ]
+    # Where the ball met them, not just how they were standing.
+    contact_ball = next(
+        (track[i] for step in range(8)
+         for i in (rep["frame_center"] - step, rep["frame_center"] + step)
+         if track is not None and 0 <= i < len(track) and track[i] is not None),
+        None,
+    )
+    row.update(contact_geometry(
+        analysis.frames_landmarks[rep["frame_center"]],
+        contact_ball.center if contact_ball is not None else None))
     row.update(
         contact_source=rep["contact_source"],
         contact_frac=round(rep["frame_center"] / max(frames, 1), 3),

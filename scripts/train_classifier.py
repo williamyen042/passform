@@ -31,9 +31,9 @@ from sklearn.preprocessing import StandardScaler
 # and training on them would let the model read the labeller instead of the
 # pass. Everything else in features.csv is a measurement.
 NOT_FEATURES = {"rep_id", "quality", "position", "source_video", "filename",
-                "duration", "candidates", "contact_frac", "baseline_hint",
-                "score_overall", "score_stability", "score_integrity",
-                "score_kinetic"}
+                "duration", "candidates", "contact_source", "contact_frac",
+                "baseline_hint", "score_overall", "score_stability",
+                "score_integrity", "score_kinetic"}
 FOLDS = 5
 SEED = 0
 
