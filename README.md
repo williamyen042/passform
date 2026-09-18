@@ -6,6 +6,14 @@ scores the platform.
 
 using mediapipe, opencv, numpy, onnxruntime
 
+![A scored rep: skeleton on the passer, ball trail through contact, joint angles
+and platform shape at the contact frame](docs/scored-rep.png)
+
+One rep from `main.py`. The ball is tracked across the whole flight, the kink in
+its path is the contact, and the skeleton is on whoever the ball was touching at
+that moment — not on whoever most resembled a passer. Every angle in the strip is
+read at that frame.
+
 ## How a rep is measured
 
 ```
