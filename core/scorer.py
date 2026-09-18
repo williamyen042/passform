@@ -36,12 +36,33 @@ FOOT_LANDMARKS = (27, 28, 29, 30, 31, 32)
 PRE_CONTACT_SECONDS = 0.5
 POST_CONTACT_SECONDS = 0.2
 KINETIC_PRE_CONTACT_SECONDS = 0.15
-KINETIC_POST_CONTACT_SECONDS = 0.25
+# The ball is off the platform within a frame or two of contact, so a window
+# reaching a quarter second past it measures the recovery, not the pass. On
+# rep_0063 the shoulder drifted 38 degrees over that window, almost all of it
+# after the ball had gone, and the kinetic score read 27 for a rep labelled 3.
+KINETIC_POST_CONTACT_SECONDS = 0.12
 SMOOTHING_RADIUS = 2
 BALL_GAP_INTERPOLATION_FRAMES = 3
 BALL_CONTACT_DISTANCE_GATE = 1.25
 BALL_CONTACT_VELOCITY_WINDOW = 3
 BALL_CONTACT_MIN_REVERSAL = 0.05
+# Every ratio the scorer reports is measured in torso lengths. Shoulder width
+# used to play that role and cannot: on the locked diagonal camera the passer
+# turns to face the ball, their shoulders go edge-on, and the projected width
+# collapses toward zero. Floored at 0.001 that reported a wrist gap of 0.09 as
+# "30 shoulder widths", and put feet 13 shoulder widths apart in the dataset.
+# Torso length runs along the body's long axis, so yaw barely shortens it.
+MIN_BODY_SCALE = 0.02
+# The bands below were written when ratios were divided by standing height or
+# by shoulder width. Everything is in torso lengths now, so they are converted
+# rather than re-invented - a band that was wrong before is still wrong, just
+# no longer wrong about its units as well. Standing height is 2.45 torso
+# lengths, measured over 891 frames of murphy footage. Shoulder width is taken
+# at its anatomical 0.8 and not at the 0.18 those same frames show, because
+# that 0.18 is the projection collapsing, which is why it stopped being the
+# scale in the first place.
+FROM_HEIGHT = 2.45
+FROM_SHOULDERS = 0.8
 # A passer cannot physically produce two contacts closer together than this, so
 # it doubles as the non-max-suppression window for rep segmentation.
 MIN_REP_SEPARATION_SECONDS = 0.8
@@ -54,8 +75,14 @@ REP_PEAK_MIN_FRACTION = 0.75
 REP_VALLEY_FRACTION = 0.7
 
 
-def analyze_frames(frames_landmarks, fps=30, ball_detections=None):
-    """Analyze one uploaded pass rep from an ordered landmark sequence."""
+def analyze_frames(frames_landmarks, fps=30, ball_detections=None, contacts=None):
+    """Analyze one uploaded pass rep from an ordered landmark sequence.
+
+    contacts overrides the detection above: when the caller already knows which
+    touch is the pass - because the ball track told it, and it picked the
+    passer from that same touch - letting this function choose again can score
+    a different moment than the one the pose was cropped for.
+    """
     frames = list(frames_landmarks)
     ball_detections = _aligned_ball_detections(ball_detections, len(frames))
     fps = max(float(fps or 30), 1.0)
@@ -75,13 +102,14 @@ def analyze_frames(frames_landmarks, fps=30, ball_detections=None):
     smoothed_hip_y = _smooth_series(hip_y, SMOOTHING_RADIUS)
     platform_score = _smooth_series(_platform_score_series(frames), SMOOTHING_RADIUS)
     rep_signal = _combined_rep_signal(smoothed_hip_y, platform_score, valid_indices)
-    contacts = _detect_contacts(
-        rep_signal,
-        valid_indices,
-        frames,
-        ball_detections,
-        fps,
-    )
+    if contacts is None:
+        contacts = _detect_contacts(
+            rep_signal,
+            valid_indices,
+            frames,
+            ball_detections,
+            fps,
+        )
     reps = []
     for contact in contacts:
         # Numbered after the drop, not before: a rep rejected for running off
@@ -140,8 +168,12 @@ def _score_rep(rep_index, frame_center, frames, fps, contact=None):
     if not rep_window or not contact_window:
         return None
 
+    scale = _window_scale(rep_window)
+    if math.isnan(scale):
+        return None
+
     side_name, side = _best_visible_side(contact_window)
-    measurements = _measure_rep(rep_window, contact_window, side)
+    measurements = _measure_rep(rep_window, contact_window, side, scale)
     stability = _score_stability(measurements)
     integrity = _score_integrity(measurements)
     kinetic = _score_kinetic(measurements)
@@ -173,8 +205,7 @@ def _score_rep(rep_index, frame_center, frames, fps, contact=None):
     }
 
 
-def _measure_rep(rep_window, contact_window, side):
-    center_frame = contact_window[len(contact_window) // 2]
+def _measure_rep(rep_window, contact_window, side, scale):
     shoulder_angles = []
     shoulder_y_values = []
     hip_y_values = []
@@ -198,8 +229,6 @@ def _measure_rep(rep_window, contact_window, side):
         shoulder_mid = midpoint(left_shoulder, right_shoulder)
         hip_mid = midpoint(left_hip, right_hip)
         ankle_y = max(left_ankle.y, right_ankle.y)
-        body_height = max(ankle_y - shoulder_mid[1], 0.001)
-        shoulder_width = max(distance(left_shoulder, right_shoulder), 0.001)
 
         # Stability metric: knee bend depth. Good passing form uses an athletic
         # knee bend, not locked legs and not an overly deep squat.
@@ -253,22 +282,21 @@ def _measure_rep(rep_window, contact_window, side):
             "forearm_parallel_delta": forearm_parallel_delta,
             # Integrity metric: hands should be together before contact so
             # the ball sees one flat, predictable platform.
-            "wrist_gap_ratio": distance(left_wrist, right_wrist) / shoulder_width,
+            "wrist_gap_ratio": distance(left_wrist, right_wrist) / scale,
             # Stability metric: rough center-of-gravity depth. Higher values
             # mean the hips are lower relative to the feet and shoulders.
-            "cog_ratio": (ankle_y - hip_mid[1]) / body_height,
+            "cog_ratio": (ankle_y - hip_mid[1]) / scale,
             # Stability metric: projected body mass over the support base.
             # Lower values mean the estimated mass sits closer to the middle
             # of the feet, which is better for receiving instead of reaching.
-            "balance_offset": _projected_balance_offset(landmarks),
+            "balance_offset": _projected_balance_offset(landmarks, scale),
             # Extra critique metric: compares foot width to shoulder width so
             # the scorer can flag a base that is too narrow or too wide.
-            "stance_width_ratio": distance(left_ankle, right_ankle) / shoulder_width,
+            "stance_width_ratio": distance(left_ankle, right_ankle) / scale,
             # Extra critique metric: large horizontal shoulder/hip separation
             # can indicate torso twist or loss of body alignment.
-            "shoulder_hip_offset": abs(shoulder_mid[0] - hip_mid[0]) / shoulder_width,
+            "shoulder_hip_offset": abs(shoulder_mid[0] - hip_mid[0]) / scale,
         })
-        nose_y_values.append(landmarks[0].y)
         rep_hip_y_values.append(hip_mid[1])
 
     for landmarks in contact_window:
@@ -294,20 +322,11 @@ def _measure_rep(rep_window, contact_window, side):
             landmarks[side["elbow"]],
             landmarks[side["shoulder"]],
         ))
+        nose_y_values.append(landmarks[0].y)
         forearm_headings.append(segment_heading(
             landmarks[side["elbow"]],
             landmarks[side["wrist"]],
         ))
-
-    center_shoulder_mid = midpoint(
-        center_frame[LEFT_SIDE["shoulder"]],
-        center_frame[RIGHT_SIDE["shoulder"]],
-    )
-    center_ankle_y = max(
-        center_frame[LEFT_SIDE["ankle"]].y,
-        center_frame[RIGHT_SIDE["ankle"]].y,
-    )
-    center_body_height = max(center_ankle_y - center_shoulder_mid[1], 0.001)
 
     measurements = {
         key: _safe_mean([values[key] for values in frame_measurements])
@@ -320,14 +339,14 @@ def _measure_rep(rep_window, contact_window, side):
     measurements["shoulder_hip_sync_error"] = _relative_motion_error(
         shoulder_y_values,
         hip_y_values,
-        center_body_height,
+        scale,
     )
     # Kinetic metric: platform/wrists should travel with the shoulders instead
     # of whipping independently through contact.
     measurements["platform_shoulder_sync_error"] = _relative_motion_error(
         wrist_y_values,
         shoulder_y_values,
-        center_body_height,
+        scale,
     )
     # Integrity-through-contact metric: elbows should stay locked, not flex and
     # extend rapidly as the ball arrives.
@@ -337,9 +356,16 @@ def _measure_rep(rep_window, contact_window, side):
     measurements["forearm_angle_delta"] = _angle_range(forearm_headings)
     # Stability metric: too much vertical rise means the player popped up
     # through the pass instead of staying controlled after contact.
-    measurements["body_rise"] = _safe_range(rep_hip_y_values) / center_body_height
-    # Extra critique metric: normalized head bob during the rep window.
-    measurements["head_y_delta"] = _safe_range(nose_y_values) / center_body_height
+    #
+    # Measured over the contact window, not the rep window. The rep window
+    # opens half a second before contact, which is a passer moving to the
+    # ball, so this was scoring normal footwork as popping up: on rep_0063 it
+    # read 0.96 torso lengths against a limit of 0.69 and took the whole
+    # stability term to zero for a rep labelled 3.
+    measurements["body_rise"] = _safe_range(hip_y_values) / scale
+    # Extra critique metric: head bob through contact, same window and same
+    # reason as body_rise above.
+    measurements["head_y_delta"] = _safe_range(nose_y_values) / scale
 
     return {
         key: float(round(float(value), 3)) if not math.isnan(value) else None
@@ -350,10 +376,15 @@ def _measure_rep(rep_window, contact_window, side):
 def _score_stability(measurements):
     # Stability combines lower-body loading, body height, and torso posture.
     knee_score = _score_target_range(measurements["knee_angle"], 120, 155, 90, 180)
-    cog_score = _score_target_range(measurements["cog_ratio"], 0.32, 0.52, 0.15, 0.75)
-    balance_score = _score_max_allowed(measurements["balance_offset"], 0.22, 0.55)
+    cog_score = _score_target_range(
+        measurements["cog_ratio"],
+        0.32 * FROM_HEIGHT, 0.52 * FROM_HEIGHT,
+        0.15 * FROM_HEIGHT, 0.75 * FROM_HEIGHT)
+    balance_score = _score_max_allowed(
+        measurements["balance_offset"], 0.22 * FROM_SHOULDERS, 0.55 * FROM_SHOULDERS)
     torso_score = _score_target_range(measurements["torso_angle"], 50, 80, 25, 90)
-    rise_score = _score_max_allowed(measurements["body_rise"], 0.10, 0.28)
+    rise_score = _score_max_allowed(
+        measurements["body_rise"], 0.10 * FROM_HEIGHT, 0.28 * FROM_HEIGHT)
     return _round_score(
         (knee_score * 0.25)
         + (cog_score * 0.20)
@@ -373,7 +404,8 @@ def _score_integrity(measurements):
         35,
         150,
     )
-    wrist_score = _score_max_allowed(measurements["wrist_gap_ratio"], 0.65, 1.4)
+    wrist_score = _score_max_allowed(
+        measurements["wrist_gap_ratio"], 0.65 * FROM_SHOULDERS, 1.4 * FROM_SHOULDERS)
     parallel_score = _score_max_allowed(measurements["forearm_parallel_delta"], 10, 45)
     return _round_score(
         (elbow_score * 0.35)
@@ -388,13 +420,13 @@ def _score_kinetic(measurements):
     # they should move with hips/legs instead of breaking away as arm swing.
     shoulder_sync = _score_max_allowed(
         measurements["shoulder_hip_sync_error"],
-        0.05,
-        0.22,
+        0.05 * FROM_HEIGHT,
+        0.22 * FROM_HEIGHT,
     )
     platform_sync = _score_max_allowed(
         measurements["platform_shoulder_sync_error"],
-        0.04,
-        0.18,
+        0.04 * FROM_HEIGHT,
+        0.18 * FROM_HEIGHT,
     )
     shoulder_stability = _score_max_allowed(measurements["shoulder_delta"], 18, 55)
     elbow_stability = _score_max_allowed(measurements["elbow_delta"], 8, 30)
@@ -461,9 +493,9 @@ def _integrity_critiques(measurements):
 
     if forearm_parallel_delta > 25:
         critiques.append("Bring the forearms closer to parallel before contact.")
-    if wrist_gap_ratio > 1.4:
+    if wrist_gap_ratio > 1.4 * FROM_SHOULDERS:
         critiques.append("Bring the hands together earlier to create one platform.")
-    elif wrist_gap_ratio > 0.8:
+    elif wrist_gap_ratio > 0.8 * FROM_SHOULDERS:
         critiques.append("Close the wrist gap so the platform is flatter.")
     if arm_torso_angle < 65:
         critiques.append("Hold the platform away from the stomach before contact.")
@@ -492,23 +524,23 @@ def _stability_critiques(measurements):
         critiques.append("Lean slightly forward instead of staying upright.")
     elif torso_angle < 40:
         critiques.append("Keep the chest from collapsing too far over the platform.")
-    if body_rise > 0.28:
+    if body_rise > 0.28 * FROM_HEIGHT:
         critiques.append("Avoid popping up after contact; stay low and controlled.")
 
-    if balance_offset > 0.55:
+    if balance_offset > 0.55 * FROM_SHOULDERS:
         critiques.append("Keep your body mass inside your feet instead of reaching for the ball.")
-    elif balance_offset > 0.35:
+    elif balance_offset > 0.35 * FROM_SHOULDERS:
         critiques.append("Center your weight more evenly over your base before contact.")
 
-    if stance_width_ratio < 1.0:
+    if stance_width_ratio < 1.0 * FROM_SHOULDERS:
         critiques.append("Widen the stance for a more stable passing base.")
-    elif stance_width_ratio > 2.8:
+    elif stance_width_ratio > 2.8 * FROM_SHOULDERS:
         critiques.append("Narrow the stance slightly so you can move after the pass.")
 
-    if head_y_delta > 0.08:
+    if head_y_delta > 0.08 * FROM_HEIGHT:
         critiques.append("Keep the head quieter through contact to improve control.")
 
-    if shoulder_hip_offset > 1.2:
+    if shoulder_hip_offset > 1.2 * FROM_SHOULDERS:
         critiques.append("Keep shoulders and hips more connected through the pass.")
 
     return critiques
@@ -526,9 +558,9 @@ def _kinetic_critiques(measurements, kinetic):
 
     if kinetic < 75:
         critiques.append("Keep the platform connected to the legs through contact.")
-    if shoulder_hip_sync_error > 0.16:
+    if shoulder_hip_sync_error > 0.16 * FROM_HEIGHT:
         critiques.append("Shoulders rose separately from the hips; drive more from the legs.")
-    if platform_shoulder_sync_error > 0.18:
+    if platform_shoulder_sync_error > 0.18 * FROM_HEIGHT:
         critiques.append("Platform moved independently of the shoulders during contact.")
     if elbow_delta > 30:
         critiques.append("Elbow angle changed too much at contact; keep the platform locked.")
@@ -652,16 +684,12 @@ def _detect_ball_contacts(frames, ball_detections, valid_indices, separation):
         if ball is None or not _has_full_pose(landmarks):
             continue
 
+        scale = body_scale(landmarks)
+        if math.isnan(scale):
+            continue
         platform_point = _platform_point(landmarks)
-        shoulder_width = max(
-            distance(
-                landmarks[LEFT_SIDE["shoulder"]],
-                landmarks[RIGHT_SIDE["shoulder"]],
-            ),
-            0.001,
-        )
         ball_center = np.array(ball["center"], dtype=float)
-        distance_ratio = float(np.linalg.norm(ball_center - platform_point) / shoulder_width)
+        distance_ratio = float(np.linalg.norm(ball_center - platform_point) / scale)
         metrics[index] = {
             "distance_ratio": distance_ratio,
             "confidence": ball["confidence"],
@@ -775,6 +803,32 @@ def _contact_value(contact, key, default=None):
     if contact is None:
         return default
     return contact.get(key, default)
+
+
+def body_scale(landmarks):
+    """Torso length: the one length that holds up when the passer turns.
+
+    NaN rather than a floored constant when the pose is too small or too broken
+    to measure. A floor turns "unmeasurable" into a confident wrong number, and
+    everything downstream then treats that number as data.
+    """
+    if not _has_full_pose(landmarks):
+        return float("nan")
+    shoulder_mid = midpoint(
+        landmarks[LEFT_SIDE["shoulder"]], landmarks[RIGHT_SIDE["shoulder"]],
+    )
+    hip_mid = midpoint(landmarks[LEFT_SIDE["hip"]], landmarks[RIGHT_SIDE["hip"]])
+    scale = float(np.linalg.norm(shoulder_mid - hip_mid))
+    return scale if scale >= MIN_BODY_SCALE else float("nan")
+
+
+def _window_scale(window):
+    """One scale for the whole rep, so a single bad frame cannot blow up a feature."""
+    values = [
+        value for value in (body_scale(landmarks) for landmarks in window)
+        if not math.isnan(value)
+    ]
+    return float(np.median(values)) if values else float("nan")
 
 
 def _platform_point(landmarks):
@@ -940,7 +994,7 @@ def _best_visible_side(window):
     return "right", RIGHT_SIDE
 
 
-def _projected_balance_offset(landmarks):
+def _projected_balance_offset(landmarks, scale):
     support_x_values = [
         landmarks[index].x
         for index in FOOT_LANDMARKS
@@ -980,15 +1034,11 @@ def _projected_balance_offset(landmarks):
         + (ankle_mid[0] * 0.08)
     )
 
-    if support_width <= 0.001:
-        shoulder_width = distance(
-            landmarks[LEFT_SIDE["shoulder"]],
-            landmarks[RIGHT_SIDE["shoulder"]],
-        )
-        support_width = max(shoulder_width, 0.001)
-
+    # Measured in torso lengths, not in widths of the base itself: feet seen
+    # end-on have almost no projected separation, and dividing by that turned
+    # a normal stance into an offset of 9.
     support_center = (support_left + support_right) / 2.0
-    return abs(projected_mass_x - support_center) / support_width
+    return abs(projected_mass_x - support_center) / scale
 
 
 def _side_visibility(window, side):
@@ -1040,22 +1090,50 @@ def _safe_mean(values):
     return float(np.mean(clean_values))
 
 
-def _safe_range(values):
+def _median_filter(values, radius=2):
+    """Impulse noise is what pose jitter is, and this is what removes it.
+
+    A 5 percent trim on a 17 frame window clips less than one sample, so the
+    dropped-joint frame still set the range through its neighbours. A median
+    over five frames deletes it outright and leaves real movement untouched.
+    """
+    if len(values) < 2 * radius + 1:
+        return list(values)
+    filtered = []
+    for index in range(len(values)):
+        window = values[max(0, index - radius):index + radius + 1]
+        filtered.append(float(np.median(window)))
+    return filtered
+
+
+def _safe_range(values, trim=5.0):
+    """How much a series moved, ignoring single-frame spikes.
+
+    MediaPipe drops a joint for one frame and puts it straight back: on
+    rep_0063 the elbow read 180, 118, 158 across three consecutive frames,
+    which no arm does in 33ms. max - min makes that one frame the whole
+    measurement, so the 5th to 95th percentile is used instead. Still the
+    spread, minus the physically impossible.
+    """
     clean_values = [
         value for value in values
         if value is not None and not math.isnan(value)
     ]
     if not clean_values:
         return float("nan")
-    return float(max(clean_values) - min(clean_values))
+    if len(clean_values) < 5:
+        return float(max(clean_values) - min(clean_values))
+    clean_values = _median_filter(clean_values)
+    return float(np.percentile(clean_values, 100 - trim)
+                 - np.percentile(clean_values, trim))
 
 
-def _relative_motion_error(primary_values, reference_values, body_height):
+def _relative_motion_error(primary_values, reference_values, scale):
     primary_delta = _motion_delta(primary_values)
     reference_delta = _motion_delta(reference_values)
     if math.isnan(primary_delta) or math.isnan(reference_delta):
         return float("nan")
-    return abs(primary_delta - reference_delta) / max(body_height, 0.001)
+    return abs(primary_delta - reference_delta) / scale
 
 
 def _motion_delta(values):
@@ -1068,7 +1146,13 @@ def _motion_delta(values):
     return float(clean_values[-1] - clean_values[0])
 
 
-def _angle_range(values):
+def _angle_range(values, trim=5.0):
+    """_safe_range for headings, which wrap at 360.
+
+    Anchored on the median rather than the first value: anchoring on the first
+    made a jittered opening frame define the whole window, which is the same
+    way one bad frame used to define an elbow's range.
+    """
     clean_values = [
         value for value in values
         if value is not None and not math.isnan(value)
@@ -1076,12 +1160,16 @@ def _angle_range(values):
     if not clean_values:
         return float("nan")
 
-    anchor = clean_values[0]
+    anchor = float(np.median(clean_values))
     relative_values = [
         (value - anchor + 180.0) % 360.0 - 180.0
         for value in clean_values
     ]
-    return float(max(relative_values) - min(relative_values))
+    if len(relative_values) < 5:
+        return float(max(relative_values) - min(relative_values))
+    relative_values = _median_filter(relative_values)
+    return float(np.percentile(relative_values, 100 - trim)
+                 - np.percentile(relative_values, trim))
 
 
 def _round_score(value):
