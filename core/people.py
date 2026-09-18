@@ -176,6 +176,81 @@ def assign_roles(tracks):
     return passer, target
 
 
+def roles_from_ball(tracks, ball_detections, fps, frame_width, frame_height):
+    """Passer, target and contact frame, decided by where the ball went.
+
+    Whoever the ball is touching when it changes direction is the person who
+    played it, and whoever it reaches next is who they played it to. That is
+    the definition, not a proxy for it.
+
+    assign_roles has to guess from platform shape, which cannot tell a passer
+    from someone standing with their hands together waiting their turn.
+    Measured on eight clips of murphy footage it picked the wrong person in
+    four. This needs the ball, so assign_roles stays as the fallback for clips
+    where the detector sees nothing.
+
+    Returns (passer, target, contact_frame) or None.
+    """
+    from core.vball_detector import touches
+
+    hits = touches(ball_detections, fps, frame_width, frame_height)
+    if not hits or not tracks:
+        return None
+
+    # The first touch in the clip is the pass. The annotator starts the clip
+    # as the rep begins and the ball is already in flight, so whatever is
+    # played first is what they were labelling; everything after it is the
+    # set, the dig, or the ball hitting the floor.
+    #
+    # Ranking by turn angle picked the setter every time - a set reverses the
+    # ball almost perfectly, near 180 degrees, where a pass turns maybe 130.
+    # Ranking by incoming speed happened to agree with time order on rep_0063,
+    # but time order is the rule that matches how the clips were cut.
+    #
+    # A serve struck inside the clip would be the first touch and would be
+    # wrong. Nothing in the current footage does that, and the tell would be a
+    # touch that accelerates the ball rather than absorbing it.
+    contact_frame = min(hits, key=lambda hit: hit[0])[0]
+    ball = ball_detections[contact_frame]
+    if ball is None:
+        return None
+
+    passer = _nearest_to(tracks, contact_frame, ball.center)
+    if passer is None:
+        return None
+
+    # The next touch in time is the arrival. Whoever is there is the target,
+    # and if nobody is, the pass did not reach anyone - which is a 0 or a 1,
+    # and the caller should be able to see that rather than have it hidden.
+    target = None
+    later = sorted(index for index, _, _, _ in hits if index > contact_frame)
+    if later:
+        arrival = later[0]
+        arriving_ball = ball_detections[arrival]
+        if arriving_ball is not None:
+            target = _nearest_to(tracks, arrival, arriving_ball.center)
+    return passer, target, contact_frame
+
+
+# Beyond this the ball is not on anybody, in normalized frame units. A touch
+# with nobody near it is the floor, not a player.
+MAX_BALL_GAP = 0.06
+
+
+def _nearest_to(tracks, frame_index, point):
+    best, best_gap = None, MAX_BALL_GAP
+    for track in tracks:
+        box = track.box(frame_index)
+        if box is None:
+            continue
+        dx = max(box[0] - point[0], 0.0, point[0] - box[2])
+        dy = max(box[1] - point[1], 0.0, point[1] - box[3])
+        gap = math.hypot(dx, dy)
+        if gap <= best_gap:
+            best, best_gap = track, gap
+    return best
+
+
 def arrival_frame(target, contact_frame, fps):
     """First frame after contact where the target reaches up to play the ball.
 
