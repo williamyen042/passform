@@ -53,8 +53,3 @@ checkpoint beats 136MB of YOLOv8x at the job, because the job is motion.
 
 Pose is MediaPipe, people detection is YOLOv8-pose via ultralytics.
 
-## Known issues
-
-`ISSUES.md` indexes them. The scoring thresholds are the honest gap: they were
-invented rather than fitted, and measured against 88 hand-labelled reps they
-scored worse than guessing. Fixing that is what the dataset exists for.
