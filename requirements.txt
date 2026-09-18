@@ -5,3 +5,6 @@ pillow
 ultralytics
 lap
 imageio-ffmpeg
+scikit-learn
+pandas
+onnxruntime

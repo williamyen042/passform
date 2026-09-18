@@ -30,6 +30,16 @@ one you just saved, and clicking a saved rep lets you re-label it or nudge
 its timestamps and re-cut the clip. Nothing is deleted: a withdrawn rep stays
 in `metadata.json` and only leaves `labels.csv`.
 
+**Contact frames, on clips you already labelled** - open the same tool and go
+to `/contact`. Each clip loops; scrub to the frame where the ball is on the
+platform and press `C`. Written to `metadata.json` as `contact_time`, seconds
+from the start of the clip.
+
+Twenty of these is enough. They are not for training - they are how you find
+out whether the automatic contact detector is right, which nothing in the
+project has ever measured. Mark them honestly and independently of what the
+tool proposes.
+
 The judgement below is the same for both. Read it before either.
 
 ---

@@ -204,6 +204,16 @@ class Dataset:
                 start_time=round(start, 3), end_time=round(end, 3),
                 duration=round(end - start, 3), quality=quality, position=position,
             )
+            if "contact_time" in changes:
+                contact = changes["contact_time"]
+                if contact is not None:
+                    contact = float(contact)
+                    if not 0 <= contact <= rep["duration"]:
+                        raise ValueError(
+                            f"contact {contact} is outside the clip (0-"
+                            f"{rep['duration']}s)")
+                    contact = round(contact, 3)
+                rep["contact_time"] = contact
             if "notes" in changes:
                 rep["notes"] = str(changes["notes"])
             if "deleted" in changes:
@@ -309,6 +319,13 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 self.wfile.write(body)
+            elif url.path == "/contact":
+                body = (HERE / "contact.html").read_bytes()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
             elif url.path == "/api/state":
                 self.send_json({
                     "dataset": str(self.dataset.root),
@@ -408,6 +425,7 @@ def main():
     print(f"footage  {root}")
     print(f"dataset  {Handler.dataset.root}  ({len(Handler.dataset.live())} reps)")
     print(f"open     {url}   (ctrl-c to stop)")
+    print(f"contact  {url}contact   (mark the contact frame on saved reps)")
     if not args.no_browser:
         threading.Timer(0.5, webbrowser.open, [url]).start()
     try:

@@ -112,3 +112,36 @@ class RangeTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class VballDecodeTest(unittest.TestCase):
+    """The heatmap decode is the whole detector: everything else is plumbing."""
+
+    def setUp(self):
+        import numpy as np
+        from core import vball_detector
+        self.np = np
+        self.mod = vball_detector
+
+    def heatmap(self, x, y, peak=0.9):
+        blob = self.np.zeros((self.mod.INPUT_HEIGHT, self.mod.INPUT_WIDTH),
+                             dtype=self.np.float32)
+        blob[y - 3:y + 4, x - 3:x + 4] = peak
+        return blob
+
+    def test_finds_the_centre_of_the_blob(self):
+        point = self.mod._decode_heatmap(self.heatmap(256, 144), 0.5)
+        self.assertIsNotNone(point)
+        x, y, peak = point
+        self.assertAlmostEqual(x, 256 / self.mod.INPUT_WIDTH, places=2)
+        self.assertAlmostEqual(y, 144 / self.mod.INPUT_HEIGHT, places=2)
+        self.assertAlmostEqual(peak, 0.9, places=5)
+
+    def test_takes_the_largest_blob_when_two_fire(self):
+        both = self.np.maximum(self.heatmap(100, 100), self.heatmap(400, 200))
+        both[195:206, 395:406] = 0.9          # make the second blob bigger
+        x, _, _ = self.mod._decode_heatmap(both, 0.5)
+        self.assertGreater(x, 0.5)
+
+    def test_nothing_above_threshold_is_not_a_detection(self):
+        self.assertIsNone(self.mod._decode_heatmap(self.heatmap(256, 144, 0.2), 0.5))

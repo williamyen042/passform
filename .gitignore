@@ -44,3 +44,11 @@ volleyball_dataset/videos/
 # Labelling artefacts
 data/*.proposals.json
 frames/
+
+# VballNet weights, fetched on demand - see core/vball_detector.py
+models/vballnet/
+
+# Derived from the clips by scripts/build_features.py, and features.jsonl
+# carries every ball position. The labels are the part worth keeping.
+volleyball_dataset/features*.csv
+volleyball_dataset/features*.jsonl
