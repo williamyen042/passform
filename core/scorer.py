@@ -53,6 +53,9 @@ BALL_CONTACT_MIN_REVERSAL = 0.05
 # "30 shoulder widths", and put feet 13 shoulder widths apart in the dataset.
 # Torso length runs along the body's long axis, so yaw barely shortens it.
 MIN_BODY_SCALE = 0.02
+# Below this the two shoulders are the same point as far as the camera is
+# concerned, and any angle taken from the line between them is noise.
+MIN_SHOULDER_SEPARATION = 0.25
 # The bands below were written when ratios were divided by standing height or
 # by shoulder width. Everything is in torso lengths now, so they are converted
 # rather than re-invented - a band that was wrong before is still wrong, just
@@ -803,6 +806,175 @@ def _contact_value(contact, key, default=None):
     if contact is None:
         return default
     return contact.get(key, default)
+
+
+def posture_at_contact(frames, contact_frame, fps):
+    """What the body was doing on the way in, not just its shape at one instant.
+
+    Every other pose measurement here is a snapshot: angles and distances at
+    the contact frame. Coaching language is mostly about the approach - move
+    the feet before the pass, do not jump at it, do not arrive late and
+    flat-footed - and none of that survives a single frame.
+
+    feet_lift   how far the feet are off the floor at contact, in torso
+                lengths. The floor is the lowest the passer's own ankles get
+                across the clip, so this needs no court calibration. A passer
+                who jumps at the ball has no angle left to play it with.
+    feet_peak   the highest they get through the approach.
+    feet_speed  how fast the feet are still travelling at contact, in torso
+                lengths per second. Moving feet at contact is arriving late.
+    """
+    blank = {"feet_lift": None, "feet_peak": None, "feet_speed": None}
+    ankles, scales = {}, {}
+    for index, landmarks in enumerate(frames):
+        if landmarks is None or not _has_full_pose(landmarks):
+            continue
+        scale = body_scale(landmarks)
+        if math.isnan(scale):
+            continue
+        ankles[index] = max(landmarks[LEFT_SIDE["ankle"]].y,
+                            landmarks[RIGHT_SIDE["ankle"]].y)
+        scales[index] = scale
+    if len(ankles) < 5 or contact_frame not in scales:
+        return blank
+
+    floor = float(np.percentile(list(ankles.values()), 95))
+    scale = scales[contact_frame]
+    window = [i for i in ankles
+              if contact_frame - 0.35 * fps <= i <= contact_frame + 0.15 * fps]
+    if not window:
+        return blank
+
+    nearest = min(window, key=lambda i: abs(i - contact_frame))
+    span = sorted(i for i in ankles if abs(i - contact_frame) <= 3)
+    speed = None
+    if len(span) > 1:
+        speed = (abs(ankles[span[-1]] - ankles[span[0]]) / scale
+                 * fps / (span[-1] - span[0]))
+    return {
+        "feet_lift": round((floor - ankles[nearest]) / scale, 3),
+        "feet_peak": round(max((floor - ankles[i]) / scale for i in window), 3),
+        "feet_speed": None if speed is None else round(speed, 3),
+    }
+
+
+def approach_quality(frames, contact_frame, fps):
+    """The coaching points that live in the approach, not in one frame.
+
+    From volleyballmag's passing fundamentals: the platform must be a flat
+    surface *before* the ball arrives, the shoulders stay square because
+    crossover steps skew the platform before the arms are even locked, and the
+    ball should be taken near the body's midline.
+
+    platform_lead   seconds the platform was already locked before contact.
+                    Assembling it late is the error the article names first.
+    shoulder_swing  degrees the shoulder line turned over the approach.
+                    Square shoulders shuffle; crossover steps rotate.
+    midline_offset  how far off the body's centre line the ball was taken, in
+                    torso lengths, signed along the shoulder axis.
+    """
+    blank = {"platform_lead": None, "shoulder_swing": None}
+    # Scan back from just before impact, not from it: the hands come apart on
+    # contact - on rep_0002 the wrist gap goes 0.08 to 0.61 in one frame - so
+    # starting at the contact frame reports every rep as never having formed a
+    # platform. The question is whether it was ready before the ball arrived.
+    lead_frames = 0
+    start = max(0, contact_frame - 2)
+    for index in range(start, max(contact_frame - int(fps), -1), -1):
+        landmarks = frames[index] if 0 <= index < len(frames) else None
+        if landmarks is None or not _has_full_pose(landmarks):
+            break
+        scale = body_scale(landmarks)
+        elbow = _safe_mean([
+            joint_angle(landmarks[side["wrist"]], landmarks[side["elbow"]],
+                        landmarks[side["shoulder"]])
+            for side in (LEFT_SIDE, RIGHT_SIDE)
+        ])
+        gap = distance(landmarks[LEFT_SIDE["wrist"]], landmarks[RIGHT_SIDE["wrist"]])
+        # Locked means straight arms and hands together. Both have to hold for
+        # the platform to be a board rather than two arms near each other.
+        if math.isnan(scale) or math.isnan(elbow) or elbow < 150 or gap / scale > 0.6:
+            break
+        lead_frames += 1
+
+    # Shoulder rotation is only measurable when the shoulders are actually
+    # separated in the image. On this diagonal camera the passer turns to face
+    # the ball and the two shoulders project onto nearly the same point - 0.02
+    # torso lengths apart on rep_0002 - where the heading of that line is
+    # arctan of noise and swings 90 degrees between frames. Same collapse that
+    # made shoulder width unusable as a scale. Below the gate this returns
+    # None, which is honest, rather than a number, which is not.
+    headings = []
+    for index in range(max(0, contact_frame - int(0.5 * fps)), contact_frame + 1):
+        landmarks = frames[index] if index < len(frames) else None
+        if landmarks is None or not _has_full_pose(landmarks):
+            continue
+        scale = body_scale(landmarks)
+        left = landmarks[LEFT_SIDE["shoulder"]]
+        right = landmarks[RIGHT_SIDE["shoulder"]]
+        if math.isnan(scale) or distance(left, right) / scale < MIN_SHOULDER_SEPARATION:
+            continue
+        # An axis, not an arrow: a shoulder line turned 180 degrees is the
+        # same line, so headings are folded into a half turn before comparison.
+        headings.append(math.degrees(
+            math.atan2(right.y - left.y, right.x - left.x)) % 180.0)
+
+    return {
+        "platform_lead": round(lead_frames / max(fps, 1), 3),
+        "shoulder_swing": (round(_angle_range(headings), 1)
+                           if len(headings) >= 5 else None),
+    }
+
+
+def midline_offset(landmarks, ball_center):
+    """How far off the body's centre line the ball was taken.
+
+    The centre-line approach - taking the ball at the midline so the redirect
+    to the setter is simple - is the article's stated ideal, and the reason a
+    passer shuffles rather than reaches. Signed along the shoulder axis, so
+    left and right do not cancel when this is averaged over a dataset.
+    """
+    if not _has_full_pose(landmarks) or ball_center is None:
+        return {"midline_offset": None}
+    scale = body_scale(landmarks)
+    if math.isnan(scale):
+        return {"midline_offset": None}
+    left = landmarks[LEFT_SIDE["shoulder"]]
+    right = landmarks[RIGHT_SIDE["shoulder"]]
+    axis = np.array([right.x - left.x, right.y - left.y])
+    length = float(np.linalg.norm(axis))
+    if length < 1e-6:
+        return {"midline_offset": None}
+    shoulder_mid = midpoint(left, right)
+    hip_mid = midpoint(landmarks[LEFT_SIDE["hip"]], landmarks[RIGHT_SIDE["hip"]])
+    centre = (shoulder_mid + hip_mid) / 2.0
+    offset = float(np.dot(np.array(ball_center) - centre, axis / length))
+    return {"midline_offset": round(offset / scale, 3)}
+
+
+def platform_angle(landmarks):
+    """Which way the platform faces, in degrees above horizontal.
+
+    The forearms are a board and the ball leaves perpendicular to it, so the
+    platform's facing is the normal to the elbow-to-wrist line. Coaching says
+    this angle controls the ball more than arm power does - which is a claim
+    that can be tested, because ball_out_angle is measured from the ball track
+    and knows nothing about the pose.
+    """
+    if not _has_full_pose(landmarks):
+        return None
+    elbow = midpoint(landmarks[LEFT_SIDE["elbow"]], landmarks[RIGHT_SIDE["elbow"]])
+    wrist = midpoint(landmarks[LEFT_SIDE["wrist"]], landmarks[RIGHT_SIDE["wrist"]])
+    forearm = wrist - elbow
+    length = float(np.linalg.norm(forearm))
+    if length < 1e-6:
+        return None
+    # Rotate the forearm direction by 90 degrees to face out of the board, and
+    # take the branch that points upward, since a pass goes up.
+    normal = np.array([-forearm[1], forearm[0]]) / length
+    if normal[1] > 0:
+        normal = -normal
+    return round(float(np.degrees(np.arctan2(-normal[1], abs(normal[0])))), 1)
 
 
 def contact_geometry(landmarks, ball_center):

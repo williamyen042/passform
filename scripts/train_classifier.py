@@ -38,8 +38,28 @@ FOLDS = 5
 SEED = 0
 
 
+# Measured on 86 reps: the body features cost the model 8 points of accuracy
+# and 19 of leave-one-session-out. Pose alone scores 0.256 against a 0.360
+# majority baseline, and predicts no measured ball outcome either - every R2
+# negative. They stay out of the model. They are still worth measuring and
+# showing; they are not worth training on.
+POSE_FEATURES = {
+    "arm_torso_angle", "balance_offset", "body_rise", "cog_ratio",
+    "contact_ahead", "contact_height", "contact_reach", "elbow_angle",
+    "elbow_delta", "feet_lift", "feet_peak", "feet_speed",
+    "forearm_angle_delta", "forearm_parallel_delta", "head_y_delta",
+    "knee_angle", "midline_offset", "platform_angle", "platform_lead",
+    "platform_shoulder_sync_error", "shoulder_delta", "shoulder_hip_offset",
+    "shoulder_hip_sync_error", "shoulder_swing", "stance_width_ratio",
+    "torso_angle", "wrist_gap_ratio",
+}
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--with-pose", action="store_true",
+                        help="Train on the body features too. Here to "
+                             "reproduce the result that they hurt, not to use.")
     parser.add_argument("--features", type=Path,
                         default=Path("volleyball_dataset/features.csv"))
     parser.add_argument("--binary", action="store_true",
@@ -100,16 +120,18 @@ def main():
     args = parse_args()
     frame = pd.read_csv(args.features)
     measured = frame[frame["candidates"] > 0]
-    dropped = len(frame) - len(measured)
+    no_contact = len(frame) - len(measured)
 
     target = measured["quality"]
     if args.binary:
         target = (target >= 2).astype(int)
-    features = measured.drop(columns=[c for c in measured.columns if c in NOT_FEATURES])
+    dropped = set(NOT_FEATURES) if args.with_pose else set(NOT_FEATURES) | POSE_FEATURES
+    features = measured.drop(columns=[c for c in measured.columns if c in dropped])
     labels = sorted(target.unique())
 
-    print(f"{len(frame)} labelled reps, {dropped} with no detected contact, "
-          f"{len(measured)} usable")
+    print(f"{len(frame)} labelled reps, {no_contact} with no detected contact, "
+          f"{len(measured)} usable"
+          + ("" if args.with_pose else "   (body features excluded, see POSE_FEATURES)"))
     print(f"{features.shape[1]} features: {', '.join(features.columns)}")
     print("class counts:", target.value_counts().sort_index().to_dict())
     print("source videos:", measured["source_video"].value_counts().to_dict())

@@ -52,3 +52,6 @@ models/vballnet/
 # carries every ball position. The labels are the part worth keeping.
 volleyball_dataset/features*.csv
 volleyball_dataset/features*.jsonl
+
+# VideoMAE embeddings, derived from the clips by scripts/video_embed.py
+volleyball_dataset/video_embeddings.npz

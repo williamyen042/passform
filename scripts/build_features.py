@@ -19,7 +19,8 @@ import time
 from pathlib import Path
 
 from core.pipeline import analyze_video
-from core.scorer import contact_geometry
+from core.scorer import (approach_quality, contact_geometry, midline_offset,
+                         platform_angle, posture_at_contact)
 import cv2
 
 from core.vball_detector import VballNetDetector, pass_features
@@ -118,9 +119,23 @@ def row_for(rep_row, clip, tracker=None):
          if track is not None and 0 <= i < len(track) and track[i] is not None),
         None,
     )
+    landmarks = analysis.frames_landmarks[rep["frame_center"]]
     row.update(contact_geometry(
-        analysis.frames_landmarks[rep["frame_center"]],
-        contact_ball.center if contact_ball is not None else None))
+        landmarks, contact_ball.center if contact_ball is not None else None))
+    # What the body was doing on the way in: jumping at the ball, or arriving
+    # late with the feet still moving. Coaching calls both out and no snapshot
+    # feature can see either.
+    row.update(posture_at_contact(
+        analysis.frames_landmarks, rep["frame_center"], analysis.fps))
+    # Which way the board faced. Coaching says this controls the ball more
+    # than arm power, and ball_out_angle is measured independently, so the two
+    # together test that claim rather than assuming it.
+    row["platform_angle"] = platform_angle(landmarks)
+    # Coaching points that live in the approach rather than in one frame.
+    row.update(approach_quality(
+        analysis.frames_landmarks, rep["frame_center"], analysis.fps))
+    row.update(midline_offset(
+        landmarks, contact_ball.center if contact_ball is not None else None))
     row.update(
         contact_source=rep["contact_source"],
         contact_frac=round(rep["frame_center"] / max(frames, 1), 3),

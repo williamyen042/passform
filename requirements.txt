@@ -8,3 +8,5 @@ imageio-ffmpeg
 scikit-learn
 pandas
 onnxruntime
+rtmlib
+transformers
