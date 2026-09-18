@@ -55,6 +55,7 @@ def analyze_video(
     start_frame=0,
     max_frames=None,
     ball_detections=None,
+    pose="mediapipe",
 ):
     """Decode a clip, find the people, measure the passer, then score them.
 
@@ -67,6 +68,11 @@ def analyze_video(
 
     rotate takes a cv2.ROTATE_* constant, for the phone footage that is
     written sideways with no orientation metadata OpenCV will act on.
+    pose picks which model reads the passer: "mediapipe" as before, or
+    "rtmpose"/"rtmpose-s"/"rtmpose-m"/"rtmpose-x". Both return the same 33-slot
+    layout, so everything downstream is unchanged and the two can be scored
+    against each other on the same clip.
+
     ball_detections takes a whole-clip track computed elsewhere, which is how
     VballNet plugs in: it reads nine frames at a time, so it cannot answer the
     per-frame question ball_detector answers.
@@ -135,7 +141,7 @@ def analyze_video(
         window = (max(0, centre - int(round(1.0 * fps))),
                   min(frame_count, centre + int(round(0.6 * fps))))
     frames_landmarks = _measure_passer(
-        video_path, rotate, start_frame, frame_count, passer, fps, window,
+        video_path, rotate, start_frame, frame_count, passer, fps, window, pose,
     )
 
     report = analyze_frames(
@@ -193,13 +199,35 @@ def _walk(video_path, rotate, start_frame, max_frames, handle):
     return fps
 
 
+RTM_MODES = {"rtmpose": "performance", "rtmpose-s": "lightweight",
+             "rtmpose-m": "balanced", "rtmpose-x": "performance"}
+
+
 def _measure_passer(video_path, rotate, start_frame, frame_count, passer, fps,
-                    window=None):
+                    window=None, pose="mediapipe"):
     """Second pass: read the passer's pose from a crop around them."""
     frames_landmarks = [None] * frame_count
     if passer is None:
         return frames_landmarks
     first, last = window if window else (0, frame_count)
+
+    if pose in RTM_MODES:
+        # RTMPose is top-down and takes the box directly, so there is no crop
+        # and no crop-to-frame mapping - one fewer coordinate transform to be
+        # wrong about.
+        from core.rtm_extractor import RTMExtractor
+        extractor = RTMExtractor(mode=RTM_MODES[pose])
+
+        def measure_rtm(frame, index):
+            if not first <= index < last:
+                return
+            box = passer.box(index)
+            if box is None:
+                return
+            frames_landmarks[index] = extractor.landmarks_for_box(frame, box)
+
+        _walk(video_path, rotate, start_frame, frame_count, measure_rtm)
+        return frames_landmarks
 
     extractor = PoseExtractor(mode="video", num_poses=SINGLE_POSE)
 
