@@ -12,6 +12,7 @@ way it always has, and the scorer's existing fallbacks handle the gaps.
 """
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import List, Optional
 
 import numpy as np
@@ -20,8 +21,15 @@ from core.ball_detector import default_device
 
 
 DEFAULT_MODEL_PATH = "yolov8m-pose.pt"
+# Ultralytics' tracker defaults assume ~30fps. See the file for what that cost.
+DEFAULT_TRACKER = "trackers/botsort_60fps.yaml"
 DEFAULT_CONFIDENCE = 0.25
-DEFAULT_IMAGE_SIZE = 960
+# Measured, not assumed: on a murphy3 frame with six people, 960 found five and
+# no confidence threshold recovered the sixth - dropping to 0.05 still found
+# five. At 1280 the missing player arrives at 0.83, which is not a marginal
+# detection, it simply was not visible at the smaller size. 1536 and 1920 find
+# the same six and cost 34% and 100% more, so 1280 is where this stops paying.
+DEFAULT_IMAGE_SIZE = 1280
 MEDIAPIPE_LANDMARKS = 33
 
 # COCO-17 index -> MediaPipe index. The joints the scorer measures are all
@@ -61,6 +69,7 @@ class PeopleDetector:
         confidence=DEFAULT_CONFIDENCE,
         image_size=DEFAULT_IMAGE_SIZE,
         device=None,
+        tracker=DEFAULT_TRACKER,
     ):
         try:
             from ultralytics import YOLO
@@ -73,6 +82,7 @@ class PeopleDetector:
         self.confidence = confidence
         self.image_size = image_size
         self.device = device or default_device()
+        self.tracker = tracker if Path(tracker).exists() else "botsort.yaml"
 
     def detect(self, frame, frame_index):
         """Every person in the frame, each with a tracking id where available."""
@@ -83,6 +93,7 @@ class PeopleDetector:
             imgsz=self.image_size,
             device=self.device,
             persist=True,
+            tracker=self.tracker,
             verbose=False,
         )
         if not results:

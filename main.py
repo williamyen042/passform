@@ -8,8 +8,10 @@ from pprint import pprint
 
 from core.angle_calculator import joint_angle, segment_angle_to_floor
 from core.ball_detector import BallDetector
+from core.vball_detector import VballNetDetector
 from core.ball_tracker import contact_frames, evaluate_fit, fit_segment, segments
 from core.pipeline import analyze_video, rep_for_frame
+from core.scorer import FROM_HEIGHT, FROM_SHOULDERS
 
 VIDEO_PATH = "data/sample_video2.mp4"
 OUTPUT_DIR = Path("output")
@@ -17,6 +19,10 @@ SAVE_OUTPUT_VIDEO = True
 # How long the last frame stays up once playback ends, so the numbers can
 # actually be read. Any key closes it sooner.
 HOLD_SECONDS = 6
+# VballNet reads nine frames at once and finds the ball by how it moves, which
+# on this footage is the difference between 15% of frames at noise confidence
+# and 50-80% at 0.65. Set False to fall back to the single-frame YOLO detector.
+USE_VBALLNET = True
 BALL_MODEL_PATH = None      # None uses the detector default
 BALL_TARGET_CLASSES = ("ball", "sports ball")
 BALL_CONFIDENCE = 0.02
@@ -182,6 +188,62 @@ def draw_ball(video, detection, placement, text):
              FONT_LABEL, BALL_BOX)
 
 
+# How much of the flight to keep behind the ball, in seconds. Long enough to
+# show the shape of the pass, short enough that a six second clip does not end
+# up with every touch drawn on top of the last.
+TRAIL_SECONDS = 1.2
+
+
+def draw_ball_path(video, detections, frame_index, placement, fps):
+    """The flight behind the ball: a tapered comet, fading into the floor.
+
+    Drawn through an alpha mask rather than as plain lines, so the tail
+    dissolves instead of stopping at an arbitrary frame. VballNet's output
+    never becomes a core.ball_tracker Track, so the older drawing path below
+    cannot see it and the render had no trail at all.
+    """
+    if not detections:
+        return
+    span = int(round(TRAIL_SECONDS * max(fps, 1)))
+    first = max(0, frame_index - span)
+    trail = [
+        (index, detection)
+        for index, detection in enumerate(detections[:frame_index + 1])
+        if detection is not None and index >= first
+    ]
+    if len(trail) < 2:
+        return
+
+    # A three point mean over the centres. The detector's centroid wobbles by
+    # a pixel or two per frame and a hand-drawn line shows every wobble.
+    points = []
+    for position, (index, _) in enumerate(trail):
+        window = trail[max(0, position - 1):position + 2]
+        x = sum(d.center[0] for _, d in window) / len(window)
+        y = sum(d.center[1] for _, d in window) / len(window)
+        points.append((index, to_pixels((x, y), placement)))
+
+    ink = np.zeros_like(video)
+    alpha = np.zeros(video.shape[:2], dtype=np.float32)
+    for (previous_index, previous), (index, point) in zip(points, points[1:]):
+        # A gap in the track is a gap in the drawing. Joining across it would
+        # invent a straight line through wherever the ball actually went.
+        if index - previous_index > 3:
+            continue
+        weight = (index - first) / max(frame_index - first, 1)
+        thickness = 1 + int(round(3 * weight ** 1.5))
+        cv2.line(ink, previous, point, bgr(TRAIL), thickness, cv2.LINE_AA)
+        cv2.line(alpha, previous, point, float(0.85 * weight ** 1.6),
+                 thickness, cv2.LINE_AA)
+
+    blend = cv2.GaussianBlur(alpha, (0, 0), 1.2)[..., None]
+    np.copyto(video, (video * (1 - blend) + ink * blend).astype(video.dtype))
+
+    head = points[-1][1]
+    cv2.circle(video, head, 9, bgr(TRAIL), 1, cv2.LINE_AA)
+    cv2.circle(video, head, 2, bgr(TRAIL), -1, cv2.LINE_AA)
+
+
 def draw_trajectory(video, track, frame_index, placement):
     if track is None:
         return
@@ -249,12 +311,26 @@ def pose_thumbnail(landmarks):
     return thumb
 
 
+# MediaPipe reports a landmark wherever it believes a joint is, including the
+# ones it cannot see. On a diagonal camera the far arm is behind the body for
+# most of a rep, and the panel was printing "arm to torso 4 deg" - not a bad
+# platform, an invisible one. Below this, the side is reported as unmeasured.
+MIN_JOINT_VISIBILITY = 0.5
+
+
 def joint_angles(landmarks):
     """Both sides at the contact frame, so asymmetry is visible."""
     if not landmarks:
         return {}
     angles = {}
     for name, side in (("left", LEFT), ("right", RIGHT)):
+        visibility = min(
+            getattr(landmarks[index], "visibility", 1.0) for index in side.values()
+        )
+        if visibility < MIN_JOINT_VISIBILITY:
+            angles[name] = {key: float("nan")
+                            for key in ("elbow", "knee", "arm_torso", "torso")}
+            continue
         angles[name] = {
             "elbow": joint_angle(landmarks[side["wrist"]], landmarks[side["elbow"]],
                                  landmarks[side["shoulder"]]),
@@ -324,7 +400,13 @@ def draw_panel(canvas, analysis, rep, text):
     y += 14
     text.add("BALL FLIGHT", (left, y), FONT_LABEL, MUTED)
     y += 24
-    if analysis.ball_track is None:
+    tracked = sum(1 for d in analysis.ball_detections if d is not None)
+    if analysis.ball_track is None and tracked:
+        # VballNet's output is already one ball per frame, so it never becomes
+        # a core.ball_tracker Track. Count the detections instead of claiming
+        # the ball was never seen.
+        text.add(f"{tracked} frames tracked", (left, y), FONT_BODY, INK)
+    elif analysis.ball_track is None:
         text.add("Not tracked in this gym", (left, y), FONT_BODY, MUTED)
     else:
         text.add(f"{len(analysis.ball_track)} frames tracked", (left, y), FONT_BODY, INK)
@@ -372,7 +454,12 @@ def draw_strip(canvas, rep, text):
 
     y = y0 + 50
     y = _measure_rows(canvas, rep, text, panel_x, edge, y, (
-        ("Wrist gap", "wrist_gap_ratio", (None, 0.65), "under 0.65", 2),
+        # Targets in torso lengths, the units the measurements are in. The
+        # panel showed "0.32-0.52" against a hip depth of 1.48 until these
+        # were converted, which reads as a terrible pass rather than as a
+        # mismatch of units.
+        ("Wrist gap", "wrist_gap_ratio", (None, 0.65 * FROM_SHOULDERS),
+         f"under {0.65 * FROM_SHOULDERS:.2f}", 2),
         ("Forearm spread", "forearm_parallel_delta", (None, 10), "under 10\u00b0", 0),
     ))
 
@@ -382,8 +469,10 @@ def draw_strip(canvas, rep, text):
     text.add("CENTRE OF GRAVITY", (panel_x, y), FONT_LABEL, ACCENT)
     y += 34
     _measure_rows(canvas, rep, text, panel_x, edge, y, (
-        ("Hip depth", "cog_ratio", (0.32, 0.52), "0.32\u20130.52", 2),
-        ("Weight offset", "balance_offset", (None, 0.22), "under 0.22", 2),
+        ("Hip depth", "cog_ratio", (0.32 * FROM_HEIGHT, 0.52 * FROM_HEIGHT),
+         f"{0.32 * FROM_HEIGHT:.2f}\u2013{0.52 * FROM_HEIGHT:.2f}", 2),
+        ("Weight offset", "balance_offset", (None, 0.22 * FROM_SHOULDERS),
+         f"under {0.22 * FROM_SHOULDERS:.2f}", 2),
     ))
 
 
@@ -413,6 +502,9 @@ def compose(frame, analysis, frame_index, rep, thumb, contacts):
         draw_landmarks(video, landmarks, placement)
     draw_ball(video, analysis.ball_detections[frame_index], placement, text)
     draw_trajectory(video, analysis.ball_track, frame_index, placement)
+    if analysis.ball_track is None:
+        draw_ball_path(video, analysis.ball_detections, frame_index, placement,
+                       analysis.fps)
     draw_contacts(video, analysis.ball_track, frame_index, contacts, placement)
 
     canvas = np.full((CANVAS_SIZE[1], CANVAS_SIZE[0], 3), bgr(PANEL_BG), np.uint8)
@@ -495,9 +587,16 @@ def main(video_path=None):
     }
     if BALL_MODEL_PATH:
         detector_options["model_path"] = BALL_MODEL_PATH
-    ball_detector = BallDetector(**detector_options)
+
     print(f"Analysing {video_path} ...")
-    analysis = analyze_video(video_path, ball_detector=ball_detector)
+    if USE_VBALLNET:
+        print("  tracking the ball ...")
+        track = VballNetDetector().track(video_path)
+        found = sum(detection is not None for detection in track)
+        print(f"  ball in {found}/{len(track)} frames")
+        analysis = analyze_video(video_path, ball_detections=track)
+    else:
+        analysis = analyze_video(video_path, ball_detector=BallDetector(**detector_options))
 
     pprint(analysis.report)
     # Named after the clip so analysing a second video does not quietly
